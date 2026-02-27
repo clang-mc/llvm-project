@@ -110,7 +110,8 @@ public:
     renderscript32, // 32-bit RenderScript
     renderscript64, // 64-bit RenderScript
     ve,             // NEC SX-Aurora Vector Engine
-    LastArchType = ve
+    mcasm,          // Mcasm: Minecraft assembly (32-bit only)
+    LastArchType = mcasm
   };
   enum SubArchType {
     NoSubArch,
@@ -1240,7 +1241,9 @@ public:
   }
 
   /// Tests if the environment supports dllimport/export annotations.
-  bool hasDLLImportExport() const { return isOSWindows() || isPS(); }
+  bool hasDLLImportExport() const {
+    return isOSWindows() || isPS() || getArch() == llvm::Triple::mcasm;
+  }
 
   /// @}
   /// @name Mutators
