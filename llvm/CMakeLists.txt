@@ -537,6 +537,7 @@ set(LLVM_ALL_TARGETS
   Hexagon
   Lanai
   LoongArch
+  Mcasm
   Mips
   MSP430
   NVPTX

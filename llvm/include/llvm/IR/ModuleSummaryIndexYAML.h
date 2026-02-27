@@ -274,8 +274,8 @@ template <> struct CustomMappingTraits<GlobalValueSummaryMapTy> {
               static_cast<bool>(FSum->flags().Live),
               static_cast<bool>(FSum->flags().DSOLocal),
               static_cast<bool>(FSum->flags().CanAutoHide),
-              FSum->flags().ImportType,
               static_cast<bool>(FSum->flags().NoRenameOnPromotion),
+              FSum->flags().ImportType,
               /*Aliasee=*/std::nullopt, Refs, FSum->type_tests(),
               FSum->type_test_assume_vcalls(), FSum->type_checked_load_vcalls(),
               FSum->type_test_assume_const_vcalls(),
@@ -288,8 +288,8 @@ template <> struct CustomMappingTraits<GlobalValueSummaryMapTy> {
               static_cast<bool>(ASum->flags().Live),
               static_cast<bool>(ASum->flags().DSOLocal),
               static_cast<bool>(ASum->flags().CanAutoHide),
-              ASum->flags().ImportType,
               static_cast<bool>(ASum->flags().NoRenameOnPromotion),
+              ASum->flags().ImportType,
               /*Aliasee=*/ASum->getAliaseeGUID()});
         }
       }
