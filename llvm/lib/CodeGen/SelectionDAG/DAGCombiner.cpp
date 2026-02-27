@@ -5253,8 +5253,10 @@ SDValue DAGCombiner::visitSDIVLike(SDValue N0, SDValue N1, SDNode *N) {
   // to handle exact sdivs efficiently. An exception is made for large bitwidths
   // exceeding what the target can natively support, as division expansion was
   // skipped in favor of this optimization.
+  // MCASM: Skip this optimization for mcasm target - it does not support shift operations
+  bool isMcasmTarget = TLI.getTargetMachine().getTargetTriple().getArch() == llvm::Triple::mcasm;
   if ((!N->getFlags().hasExact() || BitWidth > MaxLegalDivRemBitWidth) &&
-      isDivisorPowerOfTwo(N1)) {
+      isDivisorPowerOfTwo(N1) && !isMcasmTarget) {
     // Target-specific implementation of sdiv x, pow2.
     if (SDValue Res = BuildSDIVPow2(N))
       return Res;
