@@ -124,6 +124,9 @@ private:
   SDValue lowerSHLParts(SDValue Op, SelectionDAG &DAG) const;
   SDValue lowerSRLParts(SDValue Op, SelectionDAG &DAG) const;
   SDValue lowerSRAParts(SDValue Op, SelectionDAG &DAG) const;
+  SDValue lowerCTTZ(SDValue Op, SelectionDAG &DAG) const;
+  SDValue lowerCTLZ(SDValue Op, SelectionDAG &DAG) const;
+  SDValue lowerCTPOP(SDValue Op, SelectionDAG &DAG) const;
 
   // i64 support - custom lowering to libcalls
   SDValue LowerI64LibCall(SDValue Op, SelectionDAG &DAG, RTLIB::Libcall LC) const;

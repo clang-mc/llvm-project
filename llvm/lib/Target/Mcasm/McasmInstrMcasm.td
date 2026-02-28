@@ -444,6 +444,47 @@ def DIV32mi : Ii32<0xF6, MRM7m, (outs), (ins i32mem:$dst, i32imm:$src),
                    [(store (sdiv (load addr:$dst), (i32 imm:$src)), addr:$dst)]>;
 
 //===----------------------------------------------------------------------===//
+// REM - Signed Integer Remainder instruction
+//===----------------------------------------------------------------------===//
+
+// mcasm REM is TWO-ADDRESS format: REM dst, src → dst = dst % src
+// From clang-mc.wiki/ZH_Instruction-Set.md:
+//   REM RAX, R0  → RAX = RAX % R0 (signed)
+//   REM RAX, 2   → RAX = RAX % 2
+// Result sign matches the dividend (truncated division remainder).
+
+// REM - Register by Register
+def REM32rr : I<0xF8, MRMDestReg, (outs GR32:$dst), (ins GR32:$src1, GR32:$src2),
+                "rem\t$dst, $src2",
+                [(set GR32:$dst, (srem GR32:$src1, GR32:$src2))]> {
+  let Constraints = "$src1 = $dst";
+}
+
+// REM - Register by Immediate
+def REM32ri : Ii32<0xF9, MRM7r, (outs GR32:$dst), (ins GR32:$src1, i32imm:$src2),
+                   "rem\t$dst, $src2",
+                   [(set GR32:$dst, (srem GR32:$src1, imm:$src2))]> {
+  let Constraints = "$src1 = $dst";
+}
+
+// REM - Register by Memory
+def REM32rm : I<0xF8, MRMSrcMem, (outs GR32:$dst), (ins GR32:$src1, i32mem:$src2),
+                "rem\t$dst, $src2",
+                [(set GR32:$dst, (srem GR32:$src1, (load addr:$src2)))]> {
+  let Constraints = "$src1 = $dst";
+}
+
+// REM - Memory by Register (read-modify-write)
+def REM32mr : I<0xF8, MRMDestMem, (outs), (ins i32mem:$dst, GR32:$src),
+                "rem\t$dst, $src",
+                [(store (srem (load addr:$dst), GR32:$src), addr:$dst)]>;
+
+// REM - Memory by Immediate (read-modify-write)
+def REM32mi : Ii32<0xF8, MRM7m, (outs), (ins i32mem:$dst, i32imm:$src),
+                   "rem\t$dst, $src",
+                   [(store (srem (load addr:$dst), (i32 imm:$src)), addr:$dst)]>;
+
+//===----------------------------------------------------------------------===//
 // AND - Bitwise AND instruction
 //===----------------------------------------------------------------------===//
 

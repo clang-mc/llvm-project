@@ -82,13 +82,18 @@ McasmTargetLowering::McasmTargetLowering(const McasmTargetMachine &TM,
   setOperationAction(ISD::SMUL_LOHI, MVT::i32, Expand);
   setOperationAction(ISD::UMUL_LOHI, MVT::i32, Expand);
 
-  // Division - mcasm has native signed division
+  // Division - mcasm has native signed division and signed remainder
   setOperationAction(ISD::SDIV, MVT::i32, Legal);
+  setOperationAction(ISD::SREM, MVT::i32, Legal);
 
-  // Unsigned division and remainder - expand to library calls
+  // Unsigned division/remainder - no native instruction.
+  // UDIVREM/SDIVREM nodes must be Expand so LLVM does not try to combine
+  // division and remainder into a single unavailable node.
+  // UDIV/UREM Expand will then lower to __udivsi3/__umodsi3 libcalls.
   setOperationAction(ISD::UDIV, MVT::i32, Expand);
-  setOperationAction(ISD::SREM, MVT::i32, Expand);
   setOperationAction(ISD::UREM, MVT::i32, Expand);
+  setOperationAction(ISD::UDIVREM, MVT::i32, Expand);
+  setOperationAction(ISD::SDIVREM, MVT::i32, Expand);
 
   // Floating point operations - use soft float library calls via Expand
   // LLVM will automatically generate library calls for soft float
@@ -209,9 +214,14 @@ McasmTargetLowering::McasmTargetLowering(const McasmTargetMachine &TM,
   setOperationAction(ISD::AND, MVT::i32, Legal);
   setOperationAction(ISD::OR, MVT::i32, Legal);
   setOperationAction(ISD::XOR, MVT::i32, Legal);
-  setOperationAction(ISD::CTPOP, MVT::i32, Expand);
-  setOperationAction(ISD::CTLZ, MVT::i32, Expand);
-  setOperationAction(ISD::CTTZ, MVT::i32, Expand);
+  // CTTZ/CTLZ/CTPOP: Expand generates a de Bruijn byte-table lookup which
+  // requires i8 memory access — unsupported on Mcasm (word-addressed only).
+  // Use Custom lowering that only uses AND/OR/SRL/ADD/MUL (all Legal).
+  setOperationAction(ISD::CTTZ,            MVT::i32, Custom);
+  setOperationAction(ISD::CTTZ_ZERO_UNDEF, MVT::i32, Custom);
+  setOperationAction(ISD::CTLZ,            MVT::i32, Custom);
+  setOperationAction(ISD::CTLZ_ZERO_UNDEF, MVT::i32, Custom);
+  setOperationAction(ISD::CTPOP,           MVT::i32, Custom);
 
   // Comparison operations
   // mcasm has no SETcc instruction. SETCC as a value is lowered to branchless
@@ -578,6 +588,14 @@ SDValue McasmTargetLowering::LowerOperation(SDValue Op, SelectionDAG &DAG) const
     return lowerSRLParts(Op, DAG);
   case ISD::SRA_PARTS:
     return lowerSRAParts(Op, DAG);
+  case ISD::CTTZ:
+  case ISD::CTTZ_ZERO_UNDEF:
+    return lowerCTTZ(Op, DAG);
+  case ISD::CTLZ:
+  case ISD::CTLZ_ZERO_UNDEF:
+    return lowerCTLZ(Op, DAG);
+  case ISD::CTPOP:
+    return lowerCTPOP(Op, DAG);
 
   // i64 arithmetic operations - lower to libcalls
   case ISD::MUL:
@@ -674,10 +692,9 @@ SDValue McasmTargetLowering::LowerOperation(SDValue Op, SelectionDAG &DAG) const
   }
 
   default:
-    // Operation not handled - return SDValue() to signal failure
-    // This allows LLVM to use default expansion or report error
-    return SDValue();
+    break;
   }
+  return SDValue(); // operation not handled
 }
 
 SDValue McasmTargetLowering::lowerGlobalAddress(SDValue Op,
@@ -835,6 +852,173 @@ SDValue McasmTargetLowering::lowerBR_CC(SDValue Op, SelectionDAG &DAG) const {
 //     (d is 0 iff a==b; d | -d has bit 31 set iff d != 0)
 //   SETEQ = SETNE ^ 1
 //
+// ─────────────────────────────────────────────────────────────────────────────
+// CTTZ — Count Trailing Zeros (branchless, no byte-table lookup)
+//
+// 根因：Expand 时 LLVM 生成 de Bruijn 序列乘法 + 32字节 i8 查表。
+//       Mcasm 是字节寻址不支持 i8 load，故必须 Custom 实现。
+//
+// 算法：令 lsb = x & (-x)（隔离最低置位比特，是2的幂）。
+//       CTZ 的第 k 位 = (lsb & mask_k) != 0，其中：
+//         mask_0 = 0xAAAAAAAA （位置为奇数的比特）
+//         mask_1 = 0xCCCCCCCC
+//         mask_2 = 0xF0F0F0F0
+//         mask_3 = 0xFF00FF00
+//         mask_4 = 0xFFFF0000
+//       IsNonzero(v) 使用 (v | (-v)) >> 31 实现（纯算术，无条件分支）。
+//
+// 正确性证明（以 mask_k 为例）：
+//   对于任意比特位置 i（0..31），i 的二进制第 k 位 = 1
+//   当且仅当 2^i 的对应 mask_k 中该位为 1。
+//   因此 (lsb & mask_k) != 0 ⟺ bit_k(CTZ(x)) = 1。    □
+// ─────────────────────────────────────────────────────────────────────────────
+SDValue McasmTargetLowering::lowerCTTZ(SDValue Op, SelectionDAG &DAG) const {
+  SDLoc DL(Op);
+  SDValue X    = Op.getOperand(0);
+  SDValue Zero = DAG.getConstant(0,           DL, MVT::i32);
+  SDValue AllF = DAG.getConstant(0xFFFFFFFFU, DL, MVT::i32);
+  SDValue C1   = DAG.getConstant(1,           DL, MVT::i32);
+  SDValue C31  = DAG.getConstant(31,          DL, MVT::i32);
+
+  // lsb = X & (-X)  (-X = ~X + 1)
+  SDValue NotX = DAG.getNode(ISD::XOR, DL, MVT::i32, X, AllF);
+  SDValue NegX = DAG.getNode(ISD::ADD, DL, MVT::i32, NotX, C1);
+  SDValue LSB  = DAG.getNode(ISD::AND, DL, MVT::i32, X, NegX);
+
+  // IsNonzero(V): (V | (-V)) >> 31  →  0 if V==0, 1 if V!=0
+  auto IsNonzero = [&](SDValue V) -> SDValue {
+    SDValue NotV = DAG.getNode(ISD::XOR, DL, MVT::i32, V, AllF);
+    SDValue NegV = DAG.getNode(ISD::ADD, DL, MVT::i32, NotV, C1);
+    SDValue OrV  = DAG.getNode(ISD::OR,  DL, MVT::i32, V, NegV);
+    return DAG.getNode(ISD::SRL, DL, MVT::i32, OrV, C31);
+  };
+
+  // BitK: bit k of CTZ = IsNonzero(LSB & mask_k) << k
+  auto BitK = [&](uint32_t mask, unsigned k) -> SDValue {
+    SDValue Masked = DAG.getNode(ISD::AND, DL, MVT::i32, LSB,
+                                  DAG.getConstant(mask, DL, MVT::i32));
+    SDValue Bit = IsNonzero(Masked);
+    if (k == 0) return Bit;
+    return DAG.getNode(ISD::SHL, DL, MVT::i32, Bit,
+                        DAG.getConstant(k, DL, MVT::i32));
+  };
+
+  SDValue Sum = DAG.getNode(ISD::ADD, DL, MVT::i32,
+                              BitK(0xAAAAAAAAu, 0), BitK(0xCCCCCCCCu, 1));
+  Sum = DAG.getNode(ISD::ADD, DL, MVT::i32, Sum, BitK(0xF0F0F0F0u, 2));
+  Sum = DAG.getNode(ISD::ADD, DL, MVT::i32, Sum, BitK(0xFF00FF00u, 3));
+  Sum = DAG.getNode(ISD::ADD, DL, MVT::i32, Sum, BitK(0xFFFF0000u, 4));
+
+  if (Op.getOpcode() == ISD::CTTZ_ZERO_UNDEF)
+    return Sum; // x=0 行为未定义，无需处理
+
+  // CTTZ(0) = 32：IsZero = XOR(IsNonzero(X), 1)，Extra = IsZero << 5
+  SDValue IsZero = DAG.getNode(ISD::XOR, DL, MVT::i32, IsNonzero(X), C1);
+  SDValue Extra  = DAG.getNode(ISD::SHL, DL, MVT::i32, IsZero,
+                                DAG.getConstant(5, DL, MVT::i32));
+  return DAG.getNode(ISD::ADD, DL, MVT::i32, Sum, Extra);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CTLZ — Count Leading Zeros
+//
+// 算法：
+//   1. 归一化：将 x 的最高置位比特以下全部置 1
+//      x |= x>>1; x |= x>>2; x |= x>>4; x |= x>>8; x |= x>>16
+//   2. popcount(x) = 32 - CLZ(原始 x)
+//   3. CLZ = 32 - popcount（Hamming weight，纯算术，无查表）
+//
+// 特殊情况：x=0 → 归一化后仍为 0 → popcount=0 → CLZ=32 ✓
+// ─────────────────────────────────────────────────────────────────────────────
+SDValue McasmTargetLowering::lowerCTLZ(SDValue Op, SelectionDAG &DAG) const {
+  SDLoc DL(Op);
+  SDValue X = Op.getOperand(0);
+
+  // Step 1: normalize — fill all bits below MSB with 1s
+  auto OrShr = [&](SDValue V, unsigned sh) -> SDValue {
+    return DAG.getNode(ISD::OR, DL, MVT::i32, V,
+                        DAG.getNode(ISD::SRL, DL, MVT::i32, V,
+                                    DAG.getConstant(sh, DL, MVT::i32)));
+  };
+  SDValue N = OrShr(X, 1);
+  N = OrShr(N, 2);
+  N = OrShr(N, 4);
+  N = OrShr(N, 8);
+  N = OrShr(N, 16);
+
+  // Step 2: Hamming weight of N (parallel prefix, only AND/SRL/ADD/SUB/MUL)
+  SDValue C1 = DAG.getConstant(1, DL, MVT::i32);
+  SDValue C2 = DAG.getConstant(2, DL, MVT::i32);
+  SDValue C4 = DAG.getConstant(4, DL, MVT::i32);
+  SDValue Mask5  = DAG.getConstant(0x55555555U, DL, MVT::i32);
+  SDValue Mask3  = DAG.getConstant(0x33333333U, DL, MVT::i32);
+  SDValue Mask0F = DAG.getConstant(0x0F0F0F0FU, DL, MVT::i32);
+
+  // N = N - ((N >> 1) & 0x55555555)
+  N = DAG.getNode(ISD::SUB, DL, MVT::i32, N,
+                   DAG.getNode(ISD::AND, DL, MVT::i32,
+                                DAG.getNode(ISD::SRL, DL, MVT::i32, N, C1),
+                                Mask5));
+  // N = (N & 0x33333333) + ((N >> 2) & 0x33333333)
+  N = DAG.getNode(ISD::ADD, DL, MVT::i32,
+                   DAG.getNode(ISD::AND, DL, MVT::i32, N, Mask3),
+                   DAG.getNode(ISD::AND, DL, MVT::i32,
+                                DAG.getNode(ISD::SRL, DL, MVT::i32, N, C2),
+                                Mask3));
+  // N = (N + (N >> 4)) & 0x0F0F0F0F
+  N = DAG.getNode(ISD::AND, DL, MVT::i32,
+                   DAG.getNode(ISD::ADD, DL, MVT::i32, N,
+                                DAG.getNode(ISD::SRL, DL, MVT::i32, N, C4)),
+                   Mask0F);
+  // N = (N * 0x01010101) >> 24
+  N = DAG.getNode(ISD::SRL, DL, MVT::i32,
+                   DAG.getNode(ISD::MUL, DL, MVT::i32, N,
+                                DAG.getConstant(0x01010101U, DL, MVT::i32)),
+                   DAG.getConstant(24, DL, MVT::i32));
+
+  // CLZ = 32 - popcount(normalized)
+  return DAG.getNode(ISD::SUB, DL, MVT::i32,
+                      DAG.getConstant(32, DL, MVT::i32), N);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CTPOP — Population Count (Hamming weight)
+//
+// 经典并行前缀算法，仅用 AND/SRL/ADD/SUB/MUL，无查表。
+// ─────────────────────────────────────────────────────────────────────────────
+SDValue McasmTargetLowering::lowerCTPOP(SDValue Op, SelectionDAG &DAG) const {
+  SDLoc DL(Op);
+  SDValue X = Op.getOperand(0);
+  SDValue C1 = DAG.getConstant(1, DL, MVT::i32);
+  SDValue C2 = DAG.getConstant(2, DL, MVT::i32);
+  SDValue C4 = DAG.getConstant(4, DL, MVT::i32);
+  SDValue Mask5  = DAG.getConstant(0x55555555U, DL, MVT::i32);
+  SDValue Mask3  = DAG.getConstant(0x33333333U, DL, MVT::i32);
+  SDValue Mask0F = DAG.getConstant(0x0F0F0F0FU, DL, MVT::i32);
+
+  // X = X - ((X >> 1) & 0x55555555)
+  X = DAG.getNode(ISD::SUB, DL, MVT::i32, X,
+                   DAG.getNode(ISD::AND, DL, MVT::i32,
+                                DAG.getNode(ISD::SRL, DL, MVT::i32, X, C1),
+                                Mask5));
+  // X = (X & 0x33333333) + ((X >> 2) & 0x33333333)
+  X = DAG.getNode(ISD::ADD, DL, MVT::i32,
+                   DAG.getNode(ISD::AND, DL, MVT::i32, X, Mask3),
+                   DAG.getNode(ISD::AND, DL, MVT::i32,
+                                DAG.getNode(ISD::SRL, DL, MVT::i32, X, C2),
+                                Mask3));
+  // X = (X + (X >> 4)) & 0x0F0F0F0F
+  X = DAG.getNode(ISD::AND, DL, MVT::i32,
+                   DAG.getNode(ISD::ADD, DL, MVT::i32, X,
+                                DAG.getNode(ISD::SRL, DL, MVT::i32, X, C4)),
+                   Mask0F);
+  // X = (X * 0x01010101) >> 24
+  return DAG.getNode(ISD::SRL, DL, MVT::i32,
+                      DAG.getNode(ISD::MUL, DL, MVT::i32, X,
+                                   DAG.getConstant(0x01010101U, DL, MVT::i32)),
+                      DAG.getConstant(24, DL, MVT::i32));
+}
+
 SDValue McasmTargetLowering::lowerSETCC(SDValue Op, SelectionDAG &DAG) const {
   SDLoc DL(Op);
   SDValue LHS = Op.getOperand(0);
