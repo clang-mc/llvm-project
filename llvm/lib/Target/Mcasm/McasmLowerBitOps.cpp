@@ -38,7 +38,7 @@ char McasmLowerBitOpsPass::ID = 0;
 static bool isRuntimeFunctionName(StringRef N) {
   return N == "__bit_and" || N == "__bit_or" || N == "__bit_xor" ||
          N == "__bit_not" || N == "__bit_shl" || N == "__bit_shr" ||
-         N == "__bit_sar" || N == "__bit_pow2u";
+         N == "__bit_sar" || N == "__pow2u";
 }
 
 static FunctionCallee getFn(Module &M, StringRef Name, Type *RetTy,

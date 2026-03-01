@@ -9,5 +9,6 @@
 // The format of this database matches clang/Basic/Builtins.def.
 
 BUILTIN(__builtin_pow2u, "UiUi", "nc")
+BUILTIN(__builtin_declen, "ii", "nc")
 
 #undef BUILTIN
