@@ -276,6 +276,24 @@ InstructionCost McasmTTIImpl::getArithmeticInstrCost(
   int ISD = TLI->InstructionOpcodeToISD(Opcode);
   assert(ISD && "Invalid opcode");
 
+  // Mcasm bitwise ops are lowered via software runtime paths in this backend
+  // configuration, so model scalar integer bitwise ops as expensive to
+  // discourage introducing them when arithmetic alternatives exist.
+  if (LT.second.isScalarInteger()) {
+    switch (ISD) {
+    case ISD::AND:
+    case ISD::OR:
+    case ISD::XOR:
+      return LT.first * 8;
+    case ISD::SHL:
+    case ISD::SRL:
+    case ISD::SRA:
+      return LT.first * 10;
+    default:
+      break;
+    }
+  }
+
   if (ISD == ISD::MUL && Args.size() == 2 && LT.second.isVector() &&
       (LT.second.getScalarType() == MVT::i32 ||
        LT.second.getScalarType() == MVT::i64)) {
@@ -4602,6 +4620,21 @@ McasmTTIImpl::getIntrinsicInstrCost(const IntrinsicCostAttributes &ICA,
     ISD = ISD::UMULO;
     OpTy = RetTy->getContainedType(0);
     break;
+  }
+
+  // Scalar bit-count intrinsics are custom-lowered to software sequences on
+  // Mcasm; use a high default cost so middle-end transforms avoid introducing
+  // them unless truly profitable.
+  if (OpTy->isIntegerTy() && !OpTy->isVectorTy()) {
+    switch (IID) {
+    case Intrinsic::ctlz:
+    case Intrinsic::cttz:
+      return 24;
+    case Intrinsic::ctpop:
+      return 20;
+    default:
+      break;
+    }
   }
 
   if (ISD != ISD::DELETED_NODE) {
