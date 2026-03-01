@@ -281,7 +281,10 @@ bool McasmAsmPrinter::emitMcasmInlineAsmWrapper(const MachineInstr *MI) {
 
   DenseMap<unsigned, std::string> RegInputFieldByVal;
   SmallVector<unsigned, 8> RegInputVals;
+  bool HasAnyInput = false;
   for (const InlineAsmOperandDesc &D : Descs) {
+    if (D.Flag.isRegUseKind() || D.Flag.isImmKind() || D.Flag.isMemKind())
+      HasAnyInput = true;
     if (!D.Flag.isRegUseKind())
       continue;
     const MachineOperand &MO = MI->getOperand(D.OpNo);
@@ -296,6 +299,13 @@ bool McasmAsmPrinter::emitMcasmInlineAsmWrapper(const MachineInstr *MI) {
                                                       RegInputFieldByVal, Err);
   if (!Err.empty())
     report_fatal_error(Twine("mcasm inline asm wrapper: ") + Err);
+
+  // No-input asm can be emitted inline directly; helper wrapping is only
+  // needed for storage-based argument passing.
+  if (!HasAnyInput) {
+    OutStreamer->emitRawText("\t" + Replaced);
+    return true;
+  }
 
   std::string HelperBody = Replaced;
   if (StringRef(HelperBody).starts_with("inline ") &&
