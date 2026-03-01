@@ -40,7 +40,8 @@ McasmMCInstLower::McasmMCInstLower(MCContext &Ctx, const MachineFunction &MF,
     : Ctx(Ctx), MF(MF), AsmPrinter(AP) {}
 
 MCSymbol *McasmMCInstLower::GetSymbolFromOperand(const MachineOperand &MO) const {
-  assert((MO.isGlobal() || MO.isSymbol() || MO.isMBB()) &&
+  assert((MO.isGlobal() || MO.isSymbol() || MO.isMBB() || MO.isJTI() ||
+          MO.isCPI() || MO.isBlockAddress()) &&
          "Operand is not a symbol");
 
   MCSymbol *Sym = nullptr;
@@ -52,6 +53,12 @@ MCSymbol *McasmMCInstLower::GetSymbolFromOperand(const MachineOperand &MO) const
     Sym = AsmPrinter.GetExternalSymbolSymbol(MO.getSymbolName());
   } else if (MO.isMBB()) {
     Sym = MO.getMBB()->getSymbol();
+  } else if (MO.isJTI()) {
+    Sym = AsmPrinter.GetJTISymbol(MO.getIndex());
+  } else if (MO.isCPI()) {
+    Sym = AsmPrinter.GetCPISymbol(MO.getIndex());
+  } else if (MO.isBlockAddress()) {
+    Sym = AsmPrinter.GetBlockAddressSymbol(MO.getBlockAddress());
   }
 
   return Sym;
@@ -85,7 +92,13 @@ MCOperand McasmMCInstLower::LowerOperand(const MachineOperand &MO) const {
   case MachineOperand::MO_MachineBasicBlock:
   case MachineOperand::MO_GlobalAddress:
   case MachineOperand::MO_ExternalSymbol:
+  case MachineOperand::MO_ConstantPoolIndex:
+  case MachineOperand::MO_BlockAddress:
+  case MachineOperand::MO_JumpTableIndex:
     return LowerSymbolOperand(MO, GetSymbolFromOperand(MO));
+
+  case MachineOperand::MO_MCSymbol:
+    return MCOperand::createExpr(MCSymbolRefExpr::create(MO.getMCSymbol(), Ctx));
 
   case MachineOperand::MO_RegisterMask:
     // Ignore register masks.

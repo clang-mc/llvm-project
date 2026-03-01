@@ -218,8 +218,23 @@ public:
     // Call base class to add standard IR passes
     TargetPassConfig::addIRPasses();
 
+    // Lower bit-ops to __bit_* libcalls and link runtime IR.
+    addPass(createMcasmLowerBitOpsPass());
+
     fprintf(stderr, "DEBUG: McasmPassConfig::addIRPasses completed\n");
     fflush(stderr);
+  }
+
+  void addISelPrepare() override {
+    fprintf(stderr, "DEBUG: McasmPassConfig::addISelPrepare called\n");
+    fflush(stderr);
+
+    // Keep default ISel preparation first.
+    TargetPassConfig::addISelPrepare();
+
+    fprintf(stderr, "DEBUG: McasmPassConfig::addISelPrepare completed\n");
+    fflush(stderr);
+    return;
   }
 
   bool addIRTranslator() override {

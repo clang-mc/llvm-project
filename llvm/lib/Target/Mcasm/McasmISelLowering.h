@@ -19,6 +19,8 @@
 #define LLVM_LIB_TARGET_MCASM_MCASMISELLOWERING_H
 
 #include "Mcasm.h"
+#include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/StringRef.h"
 #include "llvm/CodeGen/TargetLowering.h"
 
 namespace llvm {
@@ -130,6 +132,8 @@ private:
 
   // i64 support - custom lowering to libcalls
   SDValue LowerI64LibCall(SDValue Op, SelectionDAG &DAG, RTLIB::Libcall LC) const;
+  SDValue LowerI32BitLibCall(SDValue Op, SelectionDAG &DAG, StringRef Name,
+                             ArrayRef<SDValue> Args) const;
 };
 
 } // namespace llvm

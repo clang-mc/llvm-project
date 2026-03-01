@@ -11,11 +11,27 @@
 //===----------------------------------------------------------------------===//
 
 #include "Mcasm.h"
+#include "clang/Basic/Builtins.h"
 #include "clang/Basic/MacroBuilder.h"
+#include "clang/Basic/TargetBuiltins.h"
 #include "llvm/ADT/StringSwitch.h"
 
 using namespace clang;
 using namespace clang::targets;
+
+static constexpr int NumBuiltins = Mcasm::LastTSBuiltin - Builtin::FirstTSBuiltin;
+
+static constexpr llvm::StringTable BuiltinStrings =
+    CLANG_BUILTIN_STR_TABLE_START
+#define BUILTIN CLANG_BUILTIN_STR_TABLE
+#include "clang/Basic/BuiltinsMcasm.def"
+    ;
+
+static constexpr auto BuiltinInfos = Builtin::MakeInfos<NumBuiltins>({
+#define BUILTIN CLANG_BUILTIN_ENTRY
+#define LIBBUILTIN CLANG_LIBBUILTIN_ENTRY
+#include "clang/Basic/BuiltinsMcasm.def"
+});
 
 const char *const McasmTargetInfo::GCCRegNames[] = {
     // Parameter/temporary registers (caller-saved)
@@ -51,4 +67,9 @@ void McasmTargetInfo::getTargetDefines(const LangOptions &Opts,
   // Define architecture-specific macros
   Builder.defineMacro("__mcasm");
   Builder.defineMacro("__i386__");  // For compatibility with 32-bit code
+}
+
+llvm::SmallVector<Builtin::InfosShard>
+McasmTargetInfo::getTargetBuiltins() const {
+  return {{&BuiltinStrings, BuiltinInfos}};
 }

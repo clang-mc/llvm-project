@@ -196,10 +196,11 @@ McasmTargetLowering::McasmTargetLowering(const McasmTargetMachine &TM,
 
   // i64 calling convention handled in CC_Mcasm (see McasmCallingConv.cpp)
 
-  // Shifts - now supported with native SHL/SHR/SAR instructions
-  setOperationAction(ISD::SHL, MVT::i32, Legal);
-  setOperationAction(ISD::SRA, MVT::i32, Legal);
-  setOperationAction(ISD::SRL, MVT::i32, Legal);
+  // i32 bit shifts - force custom lowering to __bit_* libcalls.
+  // This prevents DAG combine from re-introducing native bit instructions.
+  setOperationAction(ISD::SHL, MVT::i32, Custom);
+  setOperationAction(ISD::SRA, MVT::i32, Custom);
+  setOperationAction(ISD::SRL, MVT::i32, Custom);
   // No rotate instructions in mcasm
   setOperationAction(ISD::ROTL, MVT::i32, Expand);
   setOperationAction(ISD::ROTR, MVT::i32, Expand);
@@ -210,10 +211,10 @@ McasmTargetLowering::McasmTargetLowering(const McasmTargetMachine &TM,
   setOperationAction(ISD::SRL_PARTS, MVT::i32, Custom);
   setOperationAction(ISD::SRA_PARTS, MVT::i32, Custom);
 
-  // Logical operations - now supported with native AND/OR/XOR/NOT instructions
-  setOperationAction(ISD::AND, MVT::i32, Legal);
-  setOperationAction(ISD::OR, MVT::i32, Legal);
-  setOperationAction(ISD::XOR, MVT::i32, Legal);
+  // i32 logical ops - force custom lowering to __bit_* libcalls.
+  setOperationAction(ISD::AND, MVT::i32, Custom);
+  setOperationAction(ISD::OR, MVT::i32, Custom);
+  setOperationAction(ISD::XOR, MVT::i32, Custom);
   // CTTZ/CTLZ/CTPOP: Expand generates a de Bruijn byte-table lookup which
   // requires i8 memory access — unsupported on Mcasm (word-addressed only).
   // Use Custom lowering that only uses AND/OR/SRL/ADD/MUL (all Legal).
@@ -597,6 +598,26 @@ SDValue McasmTargetLowering::LowerOperation(SDValue Op, SelectionDAG &DAG) const
   case ISD::CTPOP:
     return lowerCTPOP(Op, DAG);
 
+  case ISD::AND:
+    if (Op.getValueType() == MVT::i32)
+      return LowerI32BitLibCall(Op, DAG, "__bit_and", {Op.getOperand(0), Op.getOperand(1)});
+    break;
+  case ISD::OR:
+    if (Op.getValueType() == MVT::i32)
+      return LowerI32BitLibCall(Op, DAG, "__bit_or", {Op.getOperand(0), Op.getOperand(1)});
+    break;
+  case ISD::XOR:
+    if (Op.getValueType() == MVT::i32) {
+      SDValue LHS = Op.getOperand(0);
+      SDValue RHS = Op.getOperand(1);
+      if (auto *C = dyn_cast<ConstantSDNode>(LHS); C && C->isAllOnes())
+        return LowerI32BitLibCall(Op, DAG, "__bit_not", {RHS});
+      if (auto *C = dyn_cast<ConstantSDNode>(RHS); C && C->isAllOnes())
+        return LowerI32BitLibCall(Op, DAG, "__bit_not", {LHS});
+      return LowerI32BitLibCall(Op, DAG, "__bit_xor", {LHS, RHS});
+    }
+    break;
+
   // i64 arithmetic operations - lower to libcalls
   case ISD::MUL:
     if (Op.getValueType() == MVT::i64)
@@ -619,14 +640,20 @@ SDValue McasmTargetLowering::LowerOperation(SDValue Op, SelectionDAG &DAG) const
       return LowerI64LibCall(Op, DAG, RTLIB::UREM_I64);
     break;
   case ISD::SHL:
+    if (Op.getValueType() == MVT::i32)
+      return LowerI32BitLibCall(Op, DAG, "__bit_shl", {Op.getOperand(0), Op.getOperand(1)});
     if (Op.getValueType() == MVT::i64)
       return LowerI64LibCall(Op, DAG, RTLIB::SHL_I64);
     break;
   case ISD::SRL:
+    if (Op.getValueType() == MVT::i32)
+      return LowerI32BitLibCall(Op, DAG, "__bit_shr", {Op.getOperand(0), Op.getOperand(1)});
     if (Op.getValueType() == MVT::i64)
       return LowerI64LibCall(Op, DAG, RTLIB::SRL_I64);
     break;
   case ISD::SRA:
+    if (Op.getValueType() == MVT::i32)
+      return LowerI32BitLibCall(Op, DAG, "__bit_sar", {Op.getOperand(0), Op.getOperand(1)});
     if (Op.getValueType() == MVT::i64)
       return LowerI64LibCall(Op, DAG, RTLIB::SRA_I64);
     break;
@@ -1264,6 +1291,28 @@ SDValue McasmTargetLowering::lowerSRAParts(SDValue Op, SelectionDAG &DAG) const 
                     DAG.getNode(ISD::AND, DL, VT, Hi_sign, Mask_ge32));
 
   return DAG.getMergeValues({Lo_out, Hi_out}, DL);
+}
+
+SDValue McasmTargetLowering::LowerI32BitLibCall(SDValue Op, SelectionDAG &DAG,
+                                                StringRef Name,
+                                                ArrayRef<SDValue> ArgsIn) const {
+  SDLoc DL(Op);
+  assert(Op.getValueType() == MVT::i32 && "expected i32 bit-op libcall");
+
+  Type *I32Ty = Type::getInt32Ty(*DAG.getContext());
+
+  TargetLowering::ArgListTy Args;
+  for (SDValue V : ArgsIn)
+    Args.emplace_back(V, I32Ty);
+
+  SDValue Callee = DAG.getExternalSymbol(Name.data(), getPointerTy(DAG.getDataLayout()));
+
+  TargetLowering::CallLoweringInfo CLI(DAG);
+  CLI.setDebugLoc(DL)
+      .setChain(DAG.getEntryNode())
+      .setLibCallee(CallingConv::C, I32Ty, Callee, std::move(Args));
+
+  return LowerCallTo(CLI).first;
 }
 
 // Lower i64 operations to libcalls

@@ -25,6 +25,7 @@ namespace llvm {
 
 class FunctionPass;
 class InstructionSelector;
+class Pass;
 class PassRegistry;
 class McasmRegisterBankInfo;
 class McasmSubtarget;
@@ -36,6 +37,9 @@ FunctionPass *createMcasmISelDag(McasmTargetMachine &TM, CodeGenOptLevel OptLeve
 
 /// This pass initializes a global base register for PIC on x86-32.
 FunctionPass *createMcasmGlobalBaseRegPass();
+
+/// Lower i32 bit operations to software helper calls (bit_calc defaults).
+Pass *createMcasmLowerBitOpsPass();
 
 /// This pass combines multiple accesses to local-dynamic TLS variables so that
 /// the TLS base address for the module is only fetched once per execution path

@@ -29,6 +29,7 @@ set(sources
   McasmFrameLowering.cpp
   McasmCallingConv.cpp
   McasmISelLowering.cpp
+  McasmLowerBitOps.cpp
   McasmISelDAGToDAG.cpp
   McasmInstrInfo.cpp
   McasmMachineFunctionInfo.cpp
