@@ -29,6 +29,16 @@ using namespace clang;
 using namespace clang::frontend;
 
 namespace {
+static SmallString<128> getClangSiblingIncludeDir(StringRef ResourceDir) {
+  SmallString<128> P(ResourceDir);
+  // ResourceDir is expected to be <install>/lib/clang/<version>.
+  // Convert it to <install>/include, i.e. %path_to_clang%/../include.
+  for (int I = 0; I < 3; ++I)
+    llvm::sys::path::remove_filename(P);
+  llvm::sys::path::append(P, "include");
+  return P;
+}
+
 /// Holds information about a single DirectoryLookup object.
 struct DirectoryLookupInfo {
   IncludeDirGroup Group;
@@ -183,10 +193,9 @@ void InitHeaderSearch::AddDefaultCIncludePaths(const llvm::Triple &triple,
   // Builtin includes use #include_next directives and should be positioned
   // just prior C include dirs.
   if (HSOpts.UseBuiltinIncludes) {
-    // Ignore the sys root, we *always* look for clang headers relative to
-    // supplied path.
-    SmallString<128> P = StringRef(HSOpts.ResourceDir);
-    llvm::sys::path::append(P, "include");
+    // Ignore the sys root. Use <clang>/../include as the default builtin
+    // include location instead of <resource>/include.
+    SmallString<128> P = getClangSiblingIncludeDir(HSOpts.ResourceDir);
     AddUnmappedPath(P, ExternCSystem, false);
   }
 
@@ -472,8 +481,7 @@ void clang::ApplyHeaderSearchOptions(HeaderSearch &HS,
 
   if (HSOpts.UseBuiltinIncludes) {
     // Set up the builtin include directory in the module map.
-    SmallString<128> P = StringRef(HSOpts.ResourceDir);
-    llvm::sys::path::append(P, "include");
+    SmallString<128> P = getClangSiblingIncludeDir(HSOpts.ResourceDir);
     if (auto Dir = HS.getFileMgr().getOptionalDirectoryRef(P))
       HS.getModuleMap().setBuiltinIncludeDir(*Dir);
   }
