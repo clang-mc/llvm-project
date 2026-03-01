@@ -3,7 +3,7 @@
 
 target triple = "mcasm"
 
-define dso_local i32 @__bit_pow2u(i32 %b) #0 {
+define dso_local i32 @__pow2u(i32 %b) #0 {
 entry:
   %neg = icmp slt i32 %b, 0
   br i1 %neg, label %ret0, label %check_hi
@@ -104,7 +104,7 @@ check_hi:
   br i1 %too_big, label %ret0, label %doit
 
 doit:
-  %pow = call i32 @__bit_pow2u(i32 %b)
+  %pow = call i32 @__pow2u(i32 %b)
   %r = mul i32 %a, %pow
   ret i32 %r
 
@@ -122,7 +122,7 @@ check_hi:
   br i1 %too_big, label %ret0, label %doit
 
 doit:
-  %pow = call i32 @__bit_pow2u(i32 %b)
+  %pow = call i32 @__pow2u(i32 %b)
   %r = udiv i32 %a, %pow
   ret i32 %r
 
@@ -152,10 +152,10 @@ ret_sat:
   ret i32 %sat
 
 main:
-  %pow_b = call i32 @__bit_pow2u(i32 %b)
+  %pow_b = call i32 @__pow2u(i32 %b)
   %logical = udiv i32 %a, %pow_b
   %invb = sub i32 32, %b
-  %low_mask = call i32 @__bit_pow2u(i32 %invb)
+  %low_mask = call i32 @__pow2u(i32 %invb)
   %ones_minus = sub i32 -1, %low_mask
   %sign_mask = add i32 %ones_minus, 1
   %fill = mul i32 %sign_entry, %sign_mask
@@ -163,4 +163,4 @@ main:
   ret i32 %r
 }
 
-attributes #0 = { noinline nounwind optnone readnone }
+attributes #0 = { noinline nounwind optnone memory(none) mustprogress nofree norecurse nosync willreturn }

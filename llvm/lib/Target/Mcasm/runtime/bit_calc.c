@@ -11,19 +11,6 @@ typedef int i32;
 #define U32_ONES 4294967295u
 #define U32_MSBIT 2147483648u
 
-u32 __bit_pow2u(u32 b) {
-  i32 sb = (i32)b;
-  if (sb < 0 || sb >= 32)
-    return 0u;
-  u32 p = 1u;
-  i32 i = 0;
-  while (i < sb) {
-    p = p + p;
-    i = i + 1;
-  }
-  return p;
-}
-
 u32 __bit_not(u32 a) { return U32_ONES - a; }
 
 u32 __bit_and(u32 a, u32 b) {
@@ -50,14 +37,14 @@ u32 __bit_shl(u32 a, u32 b) {
   i32 sb = (i32)b;
   if (sb < 0 || sb >= 32)
     return 0u;
-  return a * __bit_pow2u(b);
+  return a * __builtin_pow2u(b);
 }
 
 u32 __bit_shr(u32 a, u32 b) {
   i32 sb = (i32)b;
   if (sb < 0 || sb >= 32)
     return 0u;
-  return a / __bit_pow2u(b);
+  return a / __builtin_pow2u(b);
 }
 
 i32 __bit_sar(i32 a, u32 b) {
@@ -69,8 +56,8 @@ i32 __bit_sar(i32 a, u32 b) {
     return (i32)(0u - sign);
 
   u32 ua = (u32)a;
-  u32 logical = ua / __bit_pow2u(b);
-  u32 low_mask = __bit_pow2u(32u - b);
+  u32 logical = ua / __builtin_pow2u(b);
+  u32 low_mask = __builtin_pow2u(32u - b);
   u32 sign_mask = (U32_ONES - low_mask) + 1u;
   return (i32)(logical + sign * sign_mask);
 }
