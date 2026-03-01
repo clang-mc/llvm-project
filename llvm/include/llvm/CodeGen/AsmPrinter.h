@@ -965,6 +965,7 @@ private:
 
   /// This method formats and emits the specified machine instruction that is an
   /// inline asm.
+  virtual bool emitInlineAsmCustom(const MachineInstr *MI) { return false; }
   void emitInlineAsm(const MachineInstr *MI);
 
   /// Add inline assembly info to the diagnostics machinery, so we can

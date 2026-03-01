@@ -103,9 +103,7 @@ public:
   llvm::SmallVector<Builtin::InfosShard> getTargetBuiltins() const override;
 
   bool validateAsmConstraint(const char *&Name,
-                             TargetInfo::ConstraintInfo &info) const override {
-    return false;
-  }
+                             TargetInfo::ConstraintInfo &info) const override;
 
   std::string_view getClobbers() const override { return ""; }
 

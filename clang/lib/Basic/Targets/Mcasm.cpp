@@ -73,3 +73,21 @@ llvm::SmallVector<Builtin::InfosShard>
 McasmTargetInfo::getTargetBuiltins() const {
   return {{&BuiltinStrings, BuiltinInfos}};
 }
+
+bool McasmTargetInfo::validateAsmConstraint(
+    const char *&Name, TargetInfo::ConstraintInfo &Info) const {
+  switch (*Name) {
+  case 'r':
+    Info.setAllowsRegister();
+    return true;
+  case 'm':
+    Info.setAllowsMemory();
+    return true;
+  case 'i':
+  case 'n':
+    Info.setRequiresImmediate();
+    return true;
+  default:
+    return false;
+  }
+}

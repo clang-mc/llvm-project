@@ -340,6 +340,9 @@ static void EmitInlineAsmStr(const char *AsmStr, const MachineInstr *MI,
 void AsmPrinter::emitInlineAsm(const MachineInstr *MI) {
   assert(MI->isInlineAsm() && "printInlineAsm only works on inline asms");
 
+  if (emitInlineAsmCustom(MI))
+    return;
+
   // Disassemble the AsmStr, printing out the literal pieces, the operands, etc.
   const char *AsmStr = MI->getOperand(0).getSymbolName();
 

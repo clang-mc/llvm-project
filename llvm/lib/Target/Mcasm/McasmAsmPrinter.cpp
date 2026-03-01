@@ -23,6 +23,8 @@
 
 #include "McasmAsmPrinter.h"
 #include "MCTargetDesc/McasmMCTargetDesc.h"
+#include "MCTargetDesc/McasmInstPrinter.h"
+#include "MCTargetDesc/McasmBaseInfo.h"
 #include "Mcasm.h"
 #include "McasmMCInstLower.h"
 #include "McasmSubtarget.h"
@@ -35,6 +37,7 @@
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/GlobalVariable.h"
+#include "llvm/IR/InlineAsm.h"
 #include "llvm/IR/Mangler.h"
 #include "llvm/IR/Module.h"
 #include "llvm/MC/MCContext.h"
@@ -43,8 +46,168 @@
 #include "llvm/MC/MCSymbol.h"
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/raw_ostream.h"
+#include <algorithm>
+#include <cctype>
 
 using namespace llvm;
+
+static void printMcasmMemOperand(const MachineInstr *MI, unsigned OpNo,
+                                 raw_ostream &O) {
+  const MachineOperand &BaseReg = MI->getOperand(OpNo + Mcasm::AddrBaseReg);
+  const MachineOperand &Scale = MI->getOperand(OpNo + Mcasm::AddrScaleAmt);
+  const MachineOperand &IndexReg = MI->getOperand(OpNo + Mcasm::AddrIndexReg);
+  const MachineOperand &Disp = MI->getOperand(OpNo + Mcasm::AddrDisp);
+
+  O << "[";
+  bool NeedPlus = false;
+
+  if (BaseReg.isReg() && BaseReg.getReg() != 0) {
+    O << McasmInstPrinter::getRegisterName(BaseReg.getReg());
+    NeedPlus = true;
+  }
+
+  if (IndexReg.isReg() && IndexReg.getReg() != 0) {
+    if (NeedPlus)
+      O << "+";
+    if (Scale.isImm() && Scale.getImm() != 1)
+      O << Scale.getImm() << "*";
+    O << McasmInstPrinter::getRegisterName(IndexReg.getReg());
+    NeedPlus = true;
+  }
+
+  if (Disp.isImm()) {
+    int64_t V = Disp.getImm();
+    if (V != 0 || !NeedPlus) {
+      if (NeedPlus && V >= 0)
+        O << "+";
+      O << V;
+      NeedPlus = true;
+    }
+  }
+
+  if (!NeedPlus)
+    O << "0";
+
+  O << "]";
+}
+
+static std::string makeAlphaFieldName(unsigned Index) {
+  std::string Name;
+  unsigned N = Index;
+  do {
+    Name.push_back(static_cast<char>('a' + (N % 26)));
+    if (N < 26)
+      break;
+    N = N / 26 - 1;
+  } while (true);
+  std::reverse(Name.begin(), Name.end());
+  return Name;
+}
+
+struct InlineAsmOperandDesc {
+  unsigned ValIndex = 0;
+  unsigned FlagOpNo = 0;
+  unsigned OpNo = 0;
+  InlineAsm::Flag Flag = InlineAsm::Flag(0);
+};
+
+static bool buildInlineAsmOperandDescs(const MachineInstr *MI,
+                                       SmallVectorImpl<InlineAsmOperandDesc> &Descs,
+                                       std::string &Err) {
+  unsigned ValIndex = 0;
+  for (unsigned I = InlineAsm::MIOp_FirstOperand, E = MI->getNumOperands(); I < E;) {
+    const MachineOperand &MO = MI->getOperand(I);
+    if (MO.isMetadata())
+      break;
+    if (!MO.isImm()) {
+      Err = "inline asm operand descriptor is not immediate";
+      return false;
+    }
+    InlineAsm::Flag F(MO.getImm());
+    InlineAsmOperandDesc D;
+    D.ValIndex = ValIndex++;
+    D.FlagOpNo = I;
+    D.OpNo = I + 1;
+    D.Flag = F;
+    Descs.push_back(D);
+    I += F.getNumOperandRegisters() + 1;
+  }
+  return true;
+}
+
+static std::string formatInlineAsmOperandReplacement(const MachineInstr *MI,
+                                                     const InlineAsmOperandDesc &D,
+                                                     StringRef RegInputField) {
+  const MachineOperand &MO = MI->getOperand(D.OpNo);
+  if (D.Flag.isRegUseKind()) {
+    return (Twine("$(") + RegInputField + ")").str();
+  }
+  if (D.Flag.isRegDefKind() || D.Flag.isRegDefEarlyClobberKind()) {
+    if (MO.isReg())
+      return McasmInstPrinter::getRegisterName(MO.getReg());
+    return "<bad-regdef>";
+  }
+  if (D.Flag.isImmKind()) {
+    if (MO.isImm())
+      return std::to_string(MO.getImm());
+    return "<bad-imm>";
+  }
+  if (D.Flag.isMemKind()) {
+    std::string S;
+    raw_string_ostream OS(S);
+    printMcasmMemOperand(MI, D.OpNo, OS);
+    return OS.str();
+  }
+  return "<unsupported-op>";
+}
+
+static std::string replaceInlineAsmPlaceholders(
+    StringRef AsmStr, const MachineInstr *MI,
+    const SmallVectorImpl<InlineAsmOperandDesc> &Descs,
+    const DenseMap<unsigned, std::string> &RegInputFieldByVal,
+    std::string &Err) {
+  std::string Out;
+  for (size_t I = 0; I < AsmStr.size();) {
+    char C = AsmStr[I];
+    if (C != '$') {
+      Out.push_back(C);
+      ++I;
+      continue;
+    }
+
+    if (I + 1 < AsmStr.size() && AsmStr[I + 1] == '$') {
+      Out.push_back('$');
+      I += 2;
+      continue;
+    }
+
+    size_t J = I + 1;
+    if (J >= AsmStr.size() || !std::isdigit(static_cast<unsigned char>(AsmStr[J]))) {
+      Out.push_back('$');
+      ++I;
+      continue;
+    }
+
+    unsigned Val = 0;
+    while (J < AsmStr.size() && std::isdigit(static_cast<unsigned char>(AsmStr[J]))) {
+      Val = Val * 10 + static_cast<unsigned>(AsmStr[J] - '0');
+      ++J;
+    }
+
+    if (Val >= Descs.size()) {
+      Err = (Twine("inline asm placeholder out of range: $") + Twine(Val)).str();
+      return {};
+    }
+
+    const InlineAsmOperandDesc &D = Descs[Val];
+    auto It = RegInputFieldByVal.find(Val);
+    StringRef Field = (It == RegInputFieldByVal.end()) ? StringRef() : StringRef(It->second);
+    Out += formatInlineAsmOperandReplacement(MI, D, Field);
+    I = J;
+  }
+  return Out;
+}
 
 McasmAsmPrinter::McasmAsmPrinter(TargetMachine &TM,
                                  std::unique_ptr<MCStreamer> Streamer)
@@ -84,7 +247,12 @@ void McasmAsmPrinter::emitStartOfAsmFile(Module &M) {
 }
 
 void McasmAsmPrinter::emitEndOfAsmFile(Module &M) {
-  // Nothing special needed at end of file for mcasm
+  for (const InlineAsmHelperRecord &R : InlineAsmHelpers) {
+    OutStreamer->emitRawText("");
+    OutStreamer->emitRawText((Twine("export ") + R.Label + ":").str());
+    OutStreamer->emitRawText((Twine("    ") + R.Body).str());
+    OutStreamer->emitRawText("\tret");
+  }
 }
 
 bool McasmAsmPrinter::runOnMachineFunction(MachineFunction &MF) {
@@ -93,6 +261,159 @@ bool McasmAsmPrinter::runOnMachineFunction(MachineFunction &MF) {
 
   // Call base class implementation
   return AsmPrinter::runOnMachineFunction(MF);
+}
+
+bool McasmAsmPrinter::emitInlineAsmCustom(const MachineInstr *MI) {
+  return emitMcasmInlineAsmWrapper(MI);
+}
+
+bool McasmAsmPrinter::emitMcasmInlineAsmWrapper(const MachineInstr *MI) {
+  const Function &F = MF->getFunction();
+  const char *AsmStr = MI->getOperand(InlineAsm::MIOp_AsmString).getSymbolName();
+  if (!AsmStr) {
+    report_fatal_error("mcasm inline asm wrapper: missing asm string");
+  }
+
+  SmallVector<InlineAsmOperandDesc, 8> Descs;
+  std::string Err;
+  if (!buildInlineAsmOperandDescs(MI, Descs, Err))
+    report_fatal_error(Twine("mcasm inline asm wrapper: ") + Err);
+
+  DenseMap<unsigned, std::string> RegInputFieldByVal;
+  SmallVector<unsigned, 8> RegInputVals;
+  for (const InlineAsmOperandDesc &D : Descs) {
+    if (!D.Flag.isRegUseKind())
+      continue;
+    const MachineOperand &MO = MI->getOperand(D.OpNo);
+    if (!MO.isReg())
+      report_fatal_error("mcasm inline asm wrapper: reg input is not a register");
+    std::string Field = makeAlphaFieldName(static_cast<unsigned>(RegInputVals.size()));
+    RegInputVals.push_back(D.ValIndex);
+    RegInputFieldByVal.try_emplace(D.ValIndex, Field);
+  }
+
+  std::string Replaced = replaceInlineAsmPlaceholders(StringRef(AsmStr), MI, Descs,
+                                                      RegInputFieldByVal, Err);
+  if (!Err.empty())
+    report_fatal_error(Twine("mcasm inline asm wrapper: ") + Err);
+
+  std::string HelperBody = Replaced;
+  if (StringRef(HelperBody).starts_with("inline ") &&
+      !StringRef(HelperBody).starts_with("inline $")) {
+    HelperBody = (Twine("inline $") + StringRef(HelperBody).drop_front(7)).str();
+  }
+
+  unsigned Seq = InlineAsmCounter[&F]++;
+  std::string Label = (Twine("_ll_shared:z/") + F.getName() + "_" + Twine(Seq)).str();
+  InlineAsmHelpers.push_back({Label, HelperBody});
+
+  std::string Init = "inline data modify storage std:vm s0 set value {";
+  for (unsigned I = 0; I < RegInputVals.size(); ++I) {
+    if (I)
+      Init += ", ";
+    Init += RegInputFieldByVal.lookup(RegInputVals[I]);
+    Init += ": -1";
+  }
+  Init += "}";
+  OutStreamer->emitRawText("\t" + Init);
+
+  for (unsigned Val : RegInputVals) {
+    const InlineAsmOperandDesc &D = Descs[Val];
+    const MachineOperand &MO = MI->getOperand(D.OpNo);
+    std::string Reg = McasmInstPrinter::getRegisterName(MO.getReg());
+    std::string Field = RegInputFieldByVal.lookup(Val);
+    std::string Line =
+        (Twine("inline execute store result storage std:vm s0.") + Field +
+         ".ptr int 1 run scoreboard players get " + Reg + " vm_regs")
+            .str();
+    OutStreamer->emitRawText("\t" + Line);
+  }
+
+  OutStreamer->emitRawText(
+      (Twine("\tinline function ") + Label + " with storage std:vm s0").str());
+  return true;
+}
+
+bool McasmAsmPrinter::PrintAsmOperand(const MachineInstr *MI, unsigned OpNo,
+                                      const char *ExtraCode, raw_ostream &O) {
+  if (ExtraCode && ExtraCode[0]) {
+    if (ExtraCode[1] != 0)
+      return true;
+    switch (ExtraCode[0]) {
+    case 'a':
+      return PrintAsmMemoryOperand(MI, OpNo, nullptr, O);
+    case 'c': {
+      const MachineOperand &MO = MI->getOperand(OpNo);
+      if (MO.isImm()) {
+        O << MO.getImm();
+        return false;
+      }
+      if (MO.isGlobal()) {
+        PrintSymbolOperand(MO, O);
+        return false;
+      }
+      if (MO.isReg()) {
+        O << McasmInstPrinter::getRegisterName(MO.getReg());
+        return false;
+      }
+      return true;
+    }
+    case 'n': {
+      const MachineOperand &MO = MI->getOperand(OpNo);
+      if (!MO.isImm())
+        return true;
+      O << -MO.getImm();
+      return false;
+    }
+    default:
+      return true;
+    }
+  }
+
+  const MachineOperand &MO = MI->getOperand(OpNo);
+  switch (MO.getType()) {
+  case MachineOperand::MO_Register:
+    O << McasmInstPrinter::getRegisterName(MO.getReg());
+    return false;
+  case MachineOperand::MO_Immediate:
+    O << MO.getImm();
+    return false;
+  case MachineOperand::MO_GlobalAddress:
+    PrintSymbolOperand(MO, O);
+    return false;
+  case MachineOperand::MO_ExternalSymbol:
+    GetExternalSymbolSymbol(MO.getSymbolName())->print(O, MAI);
+    return false;
+  case MachineOperand::MO_MachineBasicBlock:
+    MO.getMBB()->getSymbol()->print(O, MAI);
+    return false;
+  case MachineOperand::MO_BlockAddress:
+    GetBlockAddressSymbol(MO.getBlockAddress())->print(O, MAI);
+    return false;
+  default:
+    return true;
+  }
+}
+
+bool McasmAsmPrinter::PrintAsmMemoryOperand(const MachineInstr *MI,
+                                            unsigned OpNo,
+                                            const char *ExtraCode,
+                                            raw_ostream &O) {
+  if (ExtraCode && ExtraCode[0]) {
+    if (ExtraCode[1] != 0)
+      return true;
+    if (ExtraCode[0] != 'a')
+      return true;
+  }
+
+  const MachineOperand &MO = MI->getOperand(OpNo);
+  if (MO.isReg()) {
+    O << "[" << McasmInstPrinter::getRegisterName(MO.getReg()) << "]";
+    return false;
+  }
+
+  printMcasmMemOperand(MI, OpNo, O);
+  return false;
 }
 
 void McasmAsmPrinter::emitLinkage(const GlobalValue *GV, MCSymbol *Sym) const {

@@ -51,6 +51,10 @@ public:
     return SelectionDAGISel::runOnMachineFunction(MF);
   }
 
+  bool SelectInlineAsmMemoryOperand(const SDValue &Op,
+                                    InlineAsm::ConstraintCode ConstraintCode,
+                                    std::vector<SDValue> &OutOps) override;
+
   void Select(SDNode *N) override;
 
   StringRef getPassName() const { return PASS_NAME; }
@@ -154,6 +158,24 @@ bool McasmDAGToDAGISel::SelectAddr(SDNode *Parent, SDValue N, SDValue &Base,
   // For simple cases, just use the base register
   // More complex address matching can be added here if needed
   return true;
+}
+
+bool McasmDAGToDAGISel::SelectInlineAsmMemoryOperand(
+    const SDValue &Op, InlineAsm::ConstraintCode ConstraintCode,
+    std::vector<SDValue> &OutOps) {
+  if (ConstraintCode != InlineAsm::ConstraintCode::m)
+    return true;
+
+  SDValue Base, Scale, Index, Disp, Segment;
+  if (!SelectAddr(nullptr, Op, Base, Scale, Index, Disp, Segment))
+    return true;
+
+  OutOps.push_back(Base);
+  OutOps.push_back(Scale);
+  OutOps.push_back(Index);
+  OutOps.push_back(Disp);
+  OutOps.push_back(Segment);
+  return false;
 }
 
 FunctionPass *llvm::createMcasmISelDag(McasmTargetMachine &TM,

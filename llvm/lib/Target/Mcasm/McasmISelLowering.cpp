@@ -321,6 +321,59 @@ bool McasmTargetLowering::shouldPreservePtrArith(const Function &F, EVT PtrVT) c
   return true;
 }
 
+TargetLowering::ConstraintType
+McasmTargetLowering::getConstraintType(StringRef Constraint) const {
+  if (Constraint.size() == 1) {
+    switch (Constraint[0]) {
+    case 'r':
+      return C_RegisterClass;
+    case 'm':
+      return C_Memory;
+    case 'i':
+    case 'n':
+      return C_Immediate;
+    default:
+      break;
+    }
+  }
+  return TargetLowering::getConstraintType(Constraint);
+}
+
+std::pair<unsigned, const TargetRegisterClass *>
+McasmTargetLowering::getRegForInlineAsmConstraint(
+    const TargetRegisterInfo *TRI, StringRef Constraint, MVT VT) const {
+  if (Constraint.size() == 1) {
+    switch (Constraint[0]) {
+    case 'r':
+      if (VT == MVT::i32 || VT == MVT::f32 || VT == MVT::Other ||
+          VT == MVT::iPTR || VT == MVT::i1 || VT == MVT::i8 ||
+          VT == MVT::i16)
+        return std::make_pair(0U, &Mcasm::GR32RegClass);
+      break;
+    default:
+      break;
+    }
+  }
+
+  return TargetLowering::getRegForInlineAsmConstraint(TRI, Constraint, VT);
+}
+
+void McasmTargetLowering::LowerAsmOperandForConstraint(
+    SDValue Op, StringRef Constraint, std::vector<SDValue> &Ops,
+    SelectionDAG &DAG) const {
+  if (Constraint.size() == 1) {
+    switch (Constraint[0]) {
+    case 'i':
+    case 'n':
+      TargetLowering::LowerAsmOperandForConstraint(Op, Constraint, Ops, DAG);
+      return;
+    default:
+      break;
+    }
+  }
+  TargetLowering::LowerAsmOperandForConstraint(Op, Constraint, Ops, DAG);
+}
+
 SDValue McasmTargetLowering::LowerFormalArguments(
     SDValue Chain, CallingConv::ID CallConv, bool isVarArg,
     const SmallVectorImpl<ISD::InputArg> &Ins, const SDLoc &dl,

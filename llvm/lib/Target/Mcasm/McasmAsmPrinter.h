@@ -16,6 +16,8 @@
 #ifndef LLVM_LIB_TARGET_MCASM_MCASMASMPRINTER_H
 #define LLVM_LIB_TARGET_MCASM_MCASMASMPRINTER_H
 
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/CodeGen/AsmPrinter.h"
 
 namespace llvm {
@@ -27,6 +29,12 @@ class McasmMCInstLower;
 class LLVM_LIBRARY_VISIBILITY McasmAsmPrinter : public AsmPrinter {
   const McasmSubtarget *Subtarget;
   std::unique_ptr<McasmMCInstLower> MCInstLowering;
+  struct InlineAsmHelperRecord {
+    std::string Label;
+    std::string Body;
+  };
+  DenseMap<const Function *, unsigned> InlineAsmCounter;
+  SmallVector<InlineAsmHelperRecord, 16> InlineAsmHelpers;
 
 public:
   explicit McasmAsmPrinter(TargetMachine &TM,
@@ -44,8 +52,16 @@ public:
   void emitFunctionBodyEnd() override;
   void emitInstruction(const MachineInstr *MI) override;
   void emitGlobalVariable(const GlobalVariable *GV) override;
+  bool PrintAsmOperand(const MachineInstr *MI, unsigned OpNo,
+                       const char *ExtraCode, raw_ostream &O) override;
+  bool PrintAsmMemoryOperand(const MachineInstr *MI, unsigned OpNo,
+                             const char *ExtraCode, raw_ostream &O) override;
 
   bool runOnMachineFunction(MachineFunction &MF) override;
+
+private:
+  bool emitInlineAsmCustom(const MachineInstr *MI) override;
+  bool emitMcasmInlineAsmWrapper(const MachineInstr *MI);
 };
 
 } // namespace llvm

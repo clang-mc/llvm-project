@@ -67,6 +67,8 @@ McasmMCAsmInfoDarwin::McasmMCAsmInfoDarwin(const Triple &T) {
     CodePointerSize = CalleeSaveStackSlotSize = 8;
 
   AssemblerDialect = McasmAsmSyntax;
+  setUseIntegratedAssembler(false);
+  setParseInlineAsmUsingAsmParser(false);
 
   if (!is64Bit)
     Data64bitsDirective = nullptr;       // we can't emit a 64-bit unit
@@ -119,6 +121,8 @@ McasmELFMCAsmInfo::McasmELFMCAsmInfo(const Triple &T) {
   CalleeSaveStackSlotSize = is64Bit ? 8 : 4;
 
   AssemblerDialect = McasmAsmSyntax;
+  setUseIntegratedAssembler(false);
+  setParseInlineAsmUsingAsmParser(false);
   AllowDollarAtStartOfIdentifier = false;
 
   // mcasm uses // for comments (# is reserved for preprocessor directives)
@@ -175,6 +179,8 @@ McasmMCAsmInfoMicrosoft::McasmMCAsmInfoMicrosoft(const Triple &Triple) {
   ExceptionsType = ExceptionHandling::WinEH;
 
   AssemblerDialect = McasmAsmSyntax;
+  setUseIntegratedAssembler(false);
+  setParseInlineAsmUsingAsmParser(false);
   AllowDollarAtStartOfIdentifier = false;
 
   AllowAtInName = true;
@@ -211,6 +217,8 @@ McasmMCAsmInfoGNUCOFF::McasmMCAsmInfoGNUCOFF(const Triple &Triple) {
   }
 
   AssemblerDialect = McasmAsmSyntax;
+  setUseIntegratedAssembler(false);
+  setParseInlineAsmUsingAsmParser(false);
 
   AllowAtInName = true;
   AllowDollarAtStartOfIdentifier = false;
