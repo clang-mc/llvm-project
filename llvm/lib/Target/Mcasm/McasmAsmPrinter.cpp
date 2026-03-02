@@ -209,6 +209,35 @@ static std::string replaceInlineAsmPlaceholders(
   return Out;
 }
 
+static std::string rewriteMcasmInlineHelperBody(StringRef Body) {
+  SmallVector<StringRef, 8> Lines;
+  Body.split(Lines, '\n');
+
+  std::string Out;
+  for (size_t I = 0; I < Lines.size(); ++I) {
+    StringRef Line = Lines[I];
+    size_t FirstNonWs = Line.find_first_not_of(" \t");
+    if (FirstNonWs == StringRef::npos) {
+      Out += Line.str();
+    } else {
+      StringRef Prefix = Line.take_front(FirstNonWs);
+      StringRef Core = Line.drop_front(FirstNonWs);
+      if (Core.starts_with("inline ") && !Core.starts_with("inline $") &&
+          Core.contains("$(")) {
+        Out += Prefix.str();
+        Out += (Twine("inline $") + Core.drop_front(7)).str();
+      } else {
+        Out += Line.str();
+      }
+    }
+
+    if (I + 1 < Lines.size())
+      Out += '\n';
+  }
+
+  return Out;
+}
+
 McasmAsmPrinter::McasmAsmPrinter(TargetMachine &TM,
                                  std::unique_ptr<MCStreamer> Streamer)
     : AsmPrinter(TM, std::move(Streamer)), Subtarget(nullptr) {
@@ -250,7 +279,10 @@ void McasmAsmPrinter::emitEndOfAsmFile(Module &M) {
   for (const InlineAsmHelperRecord &R : InlineAsmHelpers) {
     OutStreamer->emitRawText("");
     OutStreamer->emitRawText((Twine("export ") + R.Label + ":").str());
-    OutStreamer->emitRawText((Twine("    ") + R.Body).str());
+    SmallVector<StringRef, 8> BodyLines;
+    StringRef(R.Body).split(BodyLines, '\n');
+    for (StringRef Line : BodyLines)
+      OutStreamer->emitRawText((Twine("    ") + Line).str());
     OutStreamer->emitRawText("\tret");
   }
 }
@@ -307,11 +339,7 @@ bool McasmAsmPrinter::emitMcasmInlineAsmWrapper(const MachineInstr *MI) {
     return true;
   }
 
-  std::string HelperBody = Replaced;
-  if (StringRef(HelperBody).starts_with("inline ") &&
-      !StringRef(HelperBody).starts_with("inline $")) {
-    HelperBody = (Twine("inline $") + StringRef(HelperBody).drop_front(7)).str();
-  }
+  std::string HelperBody = rewriteMcasmInlineHelperBody(Replaced);
 
   unsigned Seq = InlineAsmCounter[&F]++;
   std::string Label = (Twine("_ll_shared:z/") + F.getName() + "_" + Twine(Seq)).str();
@@ -334,7 +362,7 @@ bool McasmAsmPrinter::emitMcasmInlineAsmWrapper(const MachineInstr *MI) {
     std::string Field = RegInputFieldByVal.lookup(Val);
     std::string Line =
         (Twine("inline execute store result storage std:vm s0.") + Field +
-         ".ptr int 1 run scoreboard players get " + Reg + " vm_regs")
+         " int 1 run scoreboard players get " + Reg + " vm_regs")
             .str();
     OutStreamer->emitRawText("\t" + Line);
   }

@@ -17,9 +17,14 @@ int inline_output_only(void) {
   return y;
 }
 
+int inline_multiline(int ret) {
+  __asm__ volatile ("inline const 1\ninline return %0" : : "r"(ret));
+  return ret;
+}
+
 // ASM-LABEL: inline_input_only:
 // ASM: inline data modify storage std:vm s0 set value {a: -1}
-// ASM: inline execute store result storage std:vm s0.a.ptr int 1 run scoreboard players get
+// ASM: inline execute store result storage std:vm s0.a int 1 run scoreboard players get
 // ASM: inline function _ll_shared:z/inline_input_only_0 with storage std:vm s0
 
 // ASM-LABEL: inline_reg_output:
@@ -30,8 +35,15 @@ int inline_output_only(void) {
 // ASM: mov 1, r0
 // ASM-NOT: inline function _ll_shared:z/inline_output_only_0 with storage std:vm s0
 
+// ASM-LABEL: inline_multiline:
+// ASM: inline function _ll_shared:z/inline_multiline_0 with storage std:vm s0
+
 // ASM: export _ll_shared:z/inline_input_only_0:
 // ASM: inline $return $(a)
 // ASM: export _ll_shared:z/inline_reg_output_0:
 // ASM: mov $(a),
 // ASM-NOT: export _ll_shared:z/inline_output_only_0:
+// ASM: export _ll_shared:z/inline_multiline_0:
+// ASM: inline const 1
+// ASM-NOT: inline $const 1
+// ASM: inline $return $(a)
