@@ -266,6 +266,10 @@ void McasmSubtarget::initLibcallLoweringInfo(LibcallLoweringInfo &Info) const {
   // to call these when it cannot inline 64-bit operations on this 32-bit target
   // -----------------------------------------------------------------------
   Info.setLibcallImpl(RTLIB::MUL_I64, RTLIB::impl___muldi3);
+  Info.setLibcallImpl(RTLIB::SDIV_I64, RTLIB::impl___divdi3);
+  Info.setLibcallImpl(RTLIB::UDIV_I64, RTLIB::impl___udivdi3);
+  Info.setLibcallImpl(RTLIB::SREM_I64, RTLIB::impl___moddi3);
+  Info.setLibcallImpl(RTLIB::UREM_I64, RTLIB::impl___umoddi3);
   Info.setLibcallImpl(RTLIB::SHL_I64, RTLIB::impl___ashldi3);
   Info.setLibcallImpl(RTLIB::SRL_I64, RTLIB::impl___lshrdi3);
   Info.setLibcallImpl(RTLIB::SRA_I64, RTLIB::impl___ashrdi3);

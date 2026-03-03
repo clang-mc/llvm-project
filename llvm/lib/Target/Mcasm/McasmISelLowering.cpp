@@ -200,6 +200,17 @@ McasmTargetLowering::McasmTargetLowering(const McasmTargetMachine &TM,
   setOperationAction(ISD::SRL, MVT::i64, Expand);
   setOperationAction(ISD::SRA, MVT::i64, Expand);
 
+  // SelectionDAG makeLibCall() uses TargetLowering's libcall map.
+  // Explicitly map i64 helper calls used by custom i64 lowering.
+  setLibcallImpl(RTLIB::MUL_I64, RTLIB::impl___muldi3);
+  setLibcallImpl(RTLIB::SDIV_I64, RTLIB::impl___divdi3);
+  setLibcallImpl(RTLIB::UDIV_I64, RTLIB::impl___udivdi3);
+  setLibcallImpl(RTLIB::SREM_I64, RTLIB::impl___moddi3);
+  setLibcallImpl(RTLIB::UREM_I64, RTLIB::impl___umoddi3);
+  setLibcallImpl(RTLIB::SHL_I64, RTLIB::impl___ashldi3);
+  setLibcallImpl(RTLIB::SRL_I64, RTLIB::impl___lshrdi3);
+  setLibcallImpl(RTLIB::SRA_I64, RTLIB::impl___ashrdi3);
+
   // Disable i64 optimizations to prevent crashes
   setMaxAtomicSizeInBitsSupported(32);
   MaxStoresPerMemset = 16;
