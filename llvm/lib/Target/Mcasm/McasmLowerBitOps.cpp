@@ -68,6 +68,57 @@ bool McasmLowerBitOpsPass::runOnModule(Module &M) {
   FunctionCallee BitShr = getFn(M, "__bit_shr", I32, {I32, I32});
   FunctionCallee BitSar = getFn(M, "__bit_sar", I32, {I32, I32});
 
+  // mcasm uses 32-bit scalar storage slots. Rewrite i8/i16 memory operations
+  // to i32 loads/stores in IR to avoid subword SelectionDAG paths.
+  {
+    SmallVector<Instruction *, 128> ToEraseMem;
+    for (Function &F : M) {
+      if (F.isDeclaration() || isRuntimeFunctionName(F.getName()))
+        continue;
+
+      for (BasicBlock &BB : F) {
+        for (Instruction &I : BB) {
+          if (auto *LI = dyn_cast<LoadInst>(&I)) {
+            Type *Ty = LI->getType();
+            if (!(Ty->isIntegerTy(8) || Ty->isIntegerTy(16)))
+              continue;
+            if (LI->isVolatile() || LI->isAtomic())
+              continue;
+
+            IRBuilder<> B(LI);
+            auto *Wide = B.CreateLoad(I32, LI->getPointerOperand(),
+                                      LI->getName() + ".w32");
+            Wide->setAlignment(LI->getAlign());
+            Value *Narrow = B.CreateTrunc(Wide, Ty, LI->getName() + ".narrow");
+            LI->replaceAllUsesWith(Narrow);
+            ToEraseMem.push_back(LI);
+            Changed = true;
+            continue;
+          }
+
+          if (auto *SI = dyn_cast<StoreInst>(&I)) {
+            Type *Ty = SI->getValueOperand()->getType();
+            if (!(Ty->isIntegerTy(8) || Ty->isIntegerTy(16)))
+              continue;
+            if (SI->isVolatile() || SI->isAtomic())
+              continue;
+
+            IRBuilder<> B(SI);
+            Value *Wide = B.CreateZExt(SI->getValueOperand(), I32, "st.w32");
+            auto *NewStore = B.CreateStore(Wide, SI->getPointerOperand());
+            NewStore->setAlignment(SI->getAlign());
+            ToEraseMem.push_back(SI);
+            Changed = true;
+          }
+        }
+      }
+    }
+
+    for (auto It = ToEraseMem.rbegin(), End = ToEraseMem.rend(); It != End;
+         ++It)
+      (*It)->eraseFromParent();
+  }
+
   SmallVector<Instruction *, 128> ToErase;
 
   for (Function &F : M) {

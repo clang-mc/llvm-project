@@ -68,6 +68,8 @@ def MOV32mi : Ii32<0xC7, MRM0m, (outs), (ins i32mem:$dst, i32imm:$src),
 // and jump tables. These are lowered to Wrapper nodes in LowerOperation,
 // and then matched here to MOV32ri instructions.
 def : Pat<(i32 (McasmWrapper tglobaladdr:$src)), (MOV32ri tglobaladdr:$src)>;
+// mcasm is single-threaded: treat TLS addresses as plain global addresses.
+def : Pat<(i32 (McasmWrapper tglobaltlsaddr:$src)), (MOV32ri tglobaltlsaddr:$src)>;
 def : Pat<(i32 (McasmWrapper tblockaddress:$src)), (MOV32ri tblockaddress:$src)>;
 def : Pat<(i32 (McasmWrapper tconstpool:$src)), (MOV32ri tconstpool:$src)>;
 def : Pat<(i32 (McasmWrapper tjumptable:$src)), (MOV32ri tjumptable:$src)>;

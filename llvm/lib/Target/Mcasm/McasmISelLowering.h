@@ -120,6 +120,10 @@ public:
   /// This allows us to convert byte offsets to mcasm's 4-byte address units
   bool shouldPreservePtrArith(const Function &F, EVT PtrVT) const override;
 
+  bool allowsMisalignedMemoryAccesses(EVT VT, unsigned AS, Align Alignment,
+                                      MachineMemOperand::Flags Flags,
+                                      unsigned *Fast) const override;
+
 private:
   const McasmSubtarget &Subtarget;
 
