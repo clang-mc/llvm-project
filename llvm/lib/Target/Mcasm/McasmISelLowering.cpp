@@ -254,6 +254,16 @@ McasmTargetLowering::McasmTargetLowering(const McasmTargetMachine &TM,
   setOperationAction(ISD::SHL, MVT::i32, Custom);
   setOperationAction(ISD::SRA, MVT::i32, Custom);
   setOperationAction(ISD::SRL, MVT::i32, Custom);
+  // Handle sext i1 -> i32 early to avoid legalization loops.
+  setOperationAction(ISD::SIGN_EXTEND, MVT::i32, Custom);
+  setOperationAction(ISD::SIGN_EXTEND, MVT::i1, Custom);
+  // Custom-lower sext to i64 to avoid unstable generic splitting paths.
+  setOperationAction(ISD::SIGN_EXTEND, MVT::i64, Custom);
+  // Handle sign_extend_inreg i1/i8/i16 in i32 containers.
+  setOperationAction(ISD::SIGN_EXTEND_INREG, MVT::i1, Custom);
+  setOperationAction(ISD::SIGN_EXTEND_INREG, MVT::i8, Custom);
+  setOperationAction(ISD::SIGN_EXTEND_INREG, MVT::i16, Custom);
+  setOperationAction(ISD::SIGN_EXTEND_INREG, MVT::i32, Custom);
   // No rotate instructions in mcasm
   setOperationAction(ISD::ROTL, MVT::i32, Expand);
   setOperationAction(ISD::ROTR, MVT::i32, Expand);
@@ -278,9 +288,8 @@ McasmTargetLowering::McasmTargetLowering(const McasmTargetMachine &TM,
   setOperationAction(ISD::CTPOP,           MVT::i32, Custom);
 
   // Comparison operations
-  // mcasm has no SETcc instruction. SETCC as a value is lowered to branchless
-  // arithmetic (see lowerSETCC). This is Custom to avoid the infinite-loop that
-  // would otherwise occur: SETCC(Expand)鈫扴ELECT_CC鈫扴ETCC+SELECT鈫扴ELECT_CC鈫?..
+  // mcasm has no SETcc instruction. Lower i32 SETCC values with custom
+  // branchless arithmetic in lowerSETCC.
   setOperationAction(ISD::SETCC, MVT::i32, Custom);
 
   // Control flow operations
@@ -289,8 +298,11 @@ McasmTargetLowering::McasmTargetLowering(const McasmTargetMachine &TM,
   setOperationAction(ISD::BR_CC, MVT::i32, Custom);
   // SELECT_CC stays Expand; with SETCC+SELECT both Custom, there is no cycle.
   setOperationAction(ISD::SELECT_CC, MVT::i32, Expand);
-  // SELECT as a value is lowered to branchless arithmetic (lowerSELECT).
+  // mcasm has no CMOV/select instruction. Lower i32 SELECT with custom
+  // branchless arithmetic.
   setOperationAction(ISD::SELECT, MVT::i32, Custom);
+  // Custom-lower i64 select by splitting into two i32 selects.
+  setOperationAction(ISD::SELECT, MVT::i64, Custom);
   // BRCOND handles boolean-valued conditions (compare to 0 and branch).
   setOperationAction(ISD::BRCOND, MVT::Other, Custom);
 
@@ -450,16 +462,10 @@ SDValue McasmTargetLowering::LowerFormalArguments(
   MachineFrameInfo &MFI = MF.getFrameInfo();
   MachineRegisterInfo &RegInfo = MF.getRegInfo();
   constexpr unsigned ArgSlotSize = 4;
-  constexpr unsigned NumArgRegs = 8;
-  constexpr unsigned VarArgRegSaveAreaSize = NumArgRegs * ArgSlotSize;
 
   // Analyze incoming arguments according to calling convention
   SmallVector<CCValAssign, 16> ArgLocs;
   CCState CCInfo(CallConv, isVarArg, MF, ArgLocs, *DAG.getContext());
-  // Reserve a fixed incoming register-save area for variadic calls.
-  // This keeps stack varargs disjoint from callee spills of r0-r7.
-  if (isVarArg)
-    CCInfo.AllocateStack(VarArgRegSaveAreaSize, Align(ArgSlotSize));
   CCInfo.AnalyzeFormalArguments(Ins, CC_Mcasm);
 
   for (unsigned i = 0, e = ArgLocs.size(); i != e; ++i) {
@@ -474,6 +480,8 @@ SDValue McasmTargetLowering::LowerFormalArguments(
       // f32 parameters are passed as i32 bits (BCvt), restore to f32
       if (VA.getLocInfo() == CCValAssign::BCvt)
         ArgValue = DAG.getNode(ISD::BITCAST, dl, VA.getValVT(), ArgValue);
+      else if (VA.getValVT() != VA.getLocVT() && VA.getValVT().isInteger())
+        ArgValue = DAG.getNode(ISD::TRUNCATE, dl, VA.getValVT(), ArgValue);
       InVals.push_back(ArgValue);
     } else {
       // Argument passed on stack
@@ -482,6 +490,8 @@ SDValue McasmTargetLowering::LowerFormalArguments(
       SDValue FINode = DAG.getFrameIndex(FI, MVT::i32);
       SDValue Load = DAG.getLoad(MVT::i32, dl, Chain, FINode,
                                   MachinePointerInfo::getFixedStack(MF, FI));
+      if (VA.getValVT() != VA.getLocVT() && VA.getValVT().isInteger())
+        Load = DAG.getNode(ISD::TRUNCATE, dl, VA.getValVT(), Load);
       InVals.push_back(Load);
     }
   }
@@ -491,41 +501,21 @@ SDValue McasmTargetLowering::LowerFormalArguments(
                                         Mcasm::r3, Mcasm::r4, Mcasm::r5,
                                         Mcasm::r6, Mcasm::r7};
     auto *FuncInfo = MF.getInfo<McasmMachineFunctionInfo>();
-    SmallVector<SDValue, 8> OutChains;
     unsigned FirstVAReg = CCInfo.getFirstUnallocated(ArgRegs);
     const unsigned NumRegs = sizeof(ArgRegs) / sizeof(ArgRegs[0]);
 
     if (FirstVAReg < NumRegs) {
-      // Save remaining argument registers into their canonical shadow slots.
-      // Slot i corresponds to argument register ri.
+      // Variadic calls reserve a fixed incoming shadow area where caller writes
+      // argument-register payloads. Point va_list at the first vararg register
+      // slot; no callee-side register spills are needed here.
       int FirstOffset = static_cast<int>(FirstVAReg * ArgSlotSize);
       int FirstFI = MFI.CreateFixedObject(ArgSlotSize, FirstOffset, true);
       FuncInfo->setVarArgsFrameIndex(FirstFI);
-
-      for (unsigned I = FirstVAReg; I < NumRegs; ++I) {
-        unsigned RegVReg = RegInfo.createVirtualRegister(&Mcasm::GR32RegClass);
-        RegInfo.addLiveIn(ArgRegs[I], RegVReg);
-        SDValue Val = DAG.getCopyFromReg(Chain, dl, RegVReg, MVT::i32);
-
-        int Offset = static_cast<int>(I * ArgSlotSize);
-        int FI = (I == FirstVAReg)
-                     ? FirstFI
-                     : MFI.CreateFixedObject(ArgSlotSize, Offset, true);
-        SDValue Addr = DAG.getFrameIndex(FI, MVT::i32);
-        SDValue Store = DAG.getStore(
-            Val.getValue(1), dl, Val, Addr, MachinePointerInfo::getFixedStack(MF, FI));
-        OutChains.push_back(Store);
-      }
     } else {
       // All argument registers are consumed by fixed parameters.
       // Variable arguments start in the incoming stack argument area.
       int FI = MFI.CreateFixedObject(ArgSlotSize, CCInfo.getStackSize(), true);
       FuncInfo->setVarArgsFrameIndex(FI);
-    }
-
-    if (!OutChains.empty()) {
-      OutChains.push_back(Chain);
-      Chain = DAG.getNode(ISD::TokenFactor, dl, MVT::Other, OutChains);
     }
   }
 
@@ -545,7 +535,6 @@ SDValue McasmTargetLowering::LowerCall(
   bool isVarArg = CLI.IsVarArg;
   bool &IsTailCall = CLI.IsTailCall;
   MachineFunction &MF = DAG.getMachineFunction();
-
   // Analyze outgoing arguments
   SmallVector<CCValAssign, 16> ArgLocs;
   CCState CCInfo(CallConv, isVarArg, MF, ArgLocs, *DAG.getContext());
@@ -570,13 +559,72 @@ SDValue McasmTargetLowering::LowerCall(
     Chain = DAG.getCALLSEQ_START(Chain, NumBytes, 0, dl);
   }
 
+  auto materializeSextExtractI32 = [&](SDValue V) -> SDValue {
+    if (V.getOpcode() != ISD::EXTRACT_ELEMENT)
+      return V;
+    SDValue Base = V.getOperand(0);
+    auto *IdxC = dyn_cast<ConstantSDNode>(V.getOperand(1));
+    if (!IdxC || Base.getOpcode() != ISD::SIGN_EXTEND)
+      return V;
+
+    SDValue Src = Base.getOperand(0);
+    EVT SrcVT = Src.getValueType();
+    if (!SrcVT.isInteger())
+      return V;
+
+    SDValue Lo;
+    if (SrcVT == MVT::i32) {
+      Lo = Src;
+    } else if (SrcVT == MVT::i1) {
+      SDValue Bit = DAG.getNode(ISD::ZERO_EXTEND, dl, MVT::i32, Src);
+      Lo = DAG.getNode(ISD::SUB, dl, MVT::i32,
+                       DAG.getConstant(0, dl, MVT::i32), Bit);
+    } else if (SrcVT == MVT::i8) {
+      SDValue X = DAG.getNode(ISD::ZERO_EXTEND, dl, MVT::i32, Src);
+      SDValue Low = DAG.getNode(ISD::AND, dl, MVT::i32, X,
+                                DAG.getConstant(0xFF, dl, MVT::i32));
+      SDValue BiasX = DAG.getNode(ISD::XOR, dl, MVT::i32, Low,
+                                  DAG.getConstant(0x80, dl, MVT::i32));
+      Lo = DAG.getNode(ISD::SUB, dl, MVT::i32, BiasX,
+                       DAG.getConstant(0x80, dl, MVT::i32));
+    } else if (SrcVT == MVT::i16) {
+      SDValue X = DAG.getNode(ISD::ZERO_EXTEND, dl, MVT::i32, Src);
+      SDValue Low = DAG.getNode(ISD::AND, dl, MVT::i32, X,
+                                DAG.getConstant(0xFFFF, dl, MVT::i32));
+      SDValue BiasX = DAG.getNode(ISD::XOR, dl, MVT::i32, Low,
+                                  DAG.getConstant(0x8000, dl, MVT::i32));
+      Lo = DAG.getNode(ISD::SUB, dl, MVT::i32, BiasX,
+                       DAG.getConstant(0x8000, dl, MVT::i32));
+    } else {
+      return V;
+    }
+
+    if (IdxC->getZExtValue() == 0)
+      return Lo;
+    if (IdxC->getZExtValue() == 1)
+      return DAG.getNode(ISD::SRA, dl, MVT::i32, Lo,
+                         DAG.getConstant(31, dl, MVT::i32));
+    return V;
+  };
+
   SmallVector<std::pair<unsigned, SDValue>, 8> RegsToPass;
   SmallVector<SDValue, 8> MemOpChains;
 
   // Walk the register/memloc assignments
   for (unsigned i = 0, e = ArgLocs.size(); i != e; ++i) {
     CCValAssign &VA = ArgLocs[i];
-    SDValue Arg = OutVals[i];
+    SDValue Arg = OutVals[VA.getValNo()];
+    Arg = materializeSextExtractI32(Arg);
+
+    if (VA.getLocInfo() == CCValAssign::SExt && Arg.getValueType().isInteger() &&
+        Arg.getValueType() != VA.getLocVT())
+      Arg = DAG.getNode(ISD::SIGN_EXTEND, dl, VA.getLocVT(), Arg);
+    else if ((VA.getLocInfo() == CCValAssign::ZExt ||
+              VA.getLocInfo() == CCValAssign::AExt) &&
+             Arg.getValueType().isInteger() && Arg.getValueType() != VA.getLocVT())
+      Arg = DAG.getNode(ISD::ZERO_EXTEND, dl, VA.getLocVT(), Arg);
+    else if (VA.getLocInfo() == CCValAssign::BCvt)
+      Arg = DAG.getNode(ISD::BITCAST, dl, VA.getLocVT(), Arg);
 
     // Convert FrameIndex to actual address expression
     // When passing the address of a stack variable (e.g., &array), the IR contains
@@ -604,6 +652,31 @@ SDValue McasmTargetLowering::LowerCall(
     if (VA.isRegLoc()) {
       // Queue up register to pass
       RegsToPass.push_back(std::make_pair(VA.getLocReg(), Arg));
+
+      // For variadic calls, mirror register arguments into the reserved
+      // shadow area so callee va_start/va_arg can read them as a linear list.
+      if (isVarArg) {
+        int ShadowIndex = -1;
+        switch (VA.getLocReg()) {
+        case Mcasm::r0: ShadowIndex = 0; break;
+        case Mcasm::r1: ShadowIndex = 1; break;
+        case Mcasm::r2: ShadowIndex = 2; break;
+        case Mcasm::r3: ShadowIndex = 3; break;
+        case Mcasm::r4: ShadowIndex = 4; break;
+        case Mcasm::r5: ShadowIndex = 5; break;
+        case Mcasm::r6: ShadowIndex = 6; break;
+        case Mcasm::r7: ShadowIndex = 7; break;
+        default: break;
+        }
+        if (ShadowIndex >= 0) {
+          SDValue SlotOff = DAG.getIntPtrConstant(ShadowIndex, dl);
+          SDValue ShadowPtr = DAG.getNode(
+              ISD::ADD, dl, MVT::i32, DAG.getRegister(Mcasm::rsp, MVT::i32),
+              SlotOff);
+          MemOpChains.push_back(
+              DAG.getStore(Chain, dl, Arg, ShadowPtr, MachinePointerInfo()));
+        }
+      }
     } else {
       // Stack argument
       assert(VA.isMemLoc() && "Expected memory location");
@@ -669,10 +742,18 @@ SDValue McasmTargetLowering::LowerCall(
   RVInfo.AnalyzeCallResult(Ins, RetCC_Mcasm);
 
   for (unsigned i = 0; i != RVLocs.size(); ++i) {
-    Chain = DAG.getCopyFromReg(Chain, dl, RVLocs[i].getLocReg(),
-                                RVLocs[i].getValVT(), Glue).getValue(1);
-    Glue = Chain.getValue(2);
-    InVals.push_back(Chain.getValue(0));
+    SDValue RV = DAG.getCopyFromReg(Chain, dl, RVLocs[i].getLocReg(),
+                                    RVLocs[i].getLocVT(), Glue);
+    Chain = RV.getValue(1);
+    Glue = RV.getValue(2);
+
+    SDValue Val = RV;
+    if (RVLocs[i].getLocInfo() == CCValAssign::BCvt)
+      Val = DAG.getNode(ISD::BITCAST, dl, RVLocs[i].getValVT(), Val);
+    else if (RVLocs[i].getValVT() != RVLocs[i].getLocVT() &&
+             RVLocs[i].getValVT().isInteger())
+      Val = DAG.getNode(ISD::TRUNCATE, dl, RVLocs[i].getValVT(), Val);
+    InVals.push_back(Val);
   }
 
   // Clean up stack if needed
@@ -695,6 +776,54 @@ SDValue McasmTargetLowering::LowerReturn(
   CCState CCInfo(CallConv, isVarArg, MF, RVLocs, *DAG.getContext());
   CCInfo.AnalyzeReturn(Outs, RetCC_Mcasm);
 
+  auto materializeSextExtractI32 = [&](SDValue V) -> SDValue {
+    if (V.getOpcode() != ISD::EXTRACT_ELEMENT)
+      return V;
+    SDValue Base = V.getOperand(0);
+    auto *IdxC = dyn_cast<ConstantSDNode>(V.getOperand(1));
+    if (!IdxC || Base.getOpcode() != ISD::SIGN_EXTEND)
+      return V;
+
+    SDValue Src = Base.getOperand(0);
+    EVT SrcVT = Src.getValueType();
+    if (!SrcVT.isInteger())
+      return V;
+
+    SDValue Lo;
+    if (SrcVT == MVT::i32) {
+      Lo = Src;
+    } else if (SrcVT == MVT::i1) {
+      SDValue Bit = DAG.getNode(ISD::ZERO_EXTEND, dl, MVT::i32, Src);
+      Lo = DAG.getNode(ISD::SUB, dl, MVT::i32,
+                       DAG.getConstant(0, dl, MVT::i32), Bit);
+    } else if (SrcVT == MVT::i8) {
+      SDValue X = DAG.getNode(ISD::ZERO_EXTEND, dl, MVT::i32, Src);
+      SDValue Low = DAG.getNode(ISD::AND, dl, MVT::i32, X,
+                                DAG.getConstant(0xFF, dl, MVT::i32));
+      SDValue BiasX = DAG.getNode(ISD::XOR, dl, MVT::i32, Low,
+                                  DAG.getConstant(0x80, dl, MVT::i32));
+      Lo = DAG.getNode(ISD::SUB, dl, MVT::i32, BiasX,
+                       DAG.getConstant(0x80, dl, MVT::i32));
+    } else if (SrcVT == MVT::i16) {
+      SDValue X = DAG.getNode(ISD::ZERO_EXTEND, dl, MVT::i32, Src);
+      SDValue Low = DAG.getNode(ISD::AND, dl, MVT::i32, X,
+                                DAG.getConstant(0xFFFF, dl, MVT::i32));
+      SDValue BiasX = DAG.getNode(ISD::XOR, dl, MVT::i32, Low,
+                                  DAG.getConstant(0x8000, dl, MVT::i32));
+      Lo = DAG.getNode(ISD::SUB, dl, MVT::i32, BiasX,
+                       DAG.getConstant(0x8000, dl, MVT::i32));
+    } else {
+      return V;
+    }
+
+    if (IdxC->getZExtValue() == 0)
+      return Lo;
+    if (IdxC->getZExtValue() == 1)
+      return DAG.getNode(ISD::SRA, dl, MVT::i32, Lo,
+                         DAG.getConstant(31, dl, MVT::i32));
+    return V;
+  };
+
   SDValue Glue;
   SmallVector<SDValue, 4> RetOps;
   RetOps.push_back(Chain);  // Operand 0: Chain
@@ -710,10 +839,36 @@ SDValue McasmTargetLowering::LowerReturn(
 
     // Use VA.getValNo() 鈥?RVLocs entries can be multiple for a single original value
     SDValue Val = OutVals[VA.getValNo()];
+    Val = materializeSextExtractI32(Val);
+
+    // Materialize FrameIndex returns as an address expression.
+    // Returning an alloca pointer can surface as a raw FrameIndex at this point;
+    // CopyToReg expects a register/immediate value, not a frame index node.
+    if (Val.getOpcode() == ISD::FrameIndex) {
+      auto *FI = cast<FrameIndexSDNode>(Val);
+      const auto *TFI = static_cast<const McasmFrameLowering *>(
+          MF.getSubtarget().getFrameLowering());
+      Register FrameReg;
+      StackOffset Offset = TFI->getFrameIndexReference(MF, FI->getIndex(), FrameReg);
+      SDValue Base = DAG.getRegister(FrameReg, MVT::i32);
+      int64_t Off = Offset.getFixed();
+      if (Off != 0)
+        Val = DAG.getNode(ISD::ADD, dl, MVT::i32, Base,
+                          DAG.getConstant(Off, dl, MVT::i32));
+      else
+        Val = Base;
+    }
 
     // f32 return values must be bitcast to i32 bits before writing to return register
     if (VA.getLocInfo() == CCValAssign::BCvt)
       Val = DAG.getNode(ISD::BITCAST, dl, VA.getLocVT(), Val);
+    else if (VA.getLocInfo() == CCValAssign::SExt && Val.getValueType().isInteger() &&
+             Val.getValueType() != VA.getLocVT())
+      Val = DAG.getNode(ISD::SIGN_EXTEND, dl, VA.getLocVT(), Val);
+    else if ((VA.getLocInfo() == CCValAssign::ZExt ||
+              VA.getLocInfo() == CCValAssign::AExt) &&
+             Val.getValueType().isInteger() && Val.getValueType() != VA.getLocVT())
+      Val = DAG.getNode(ISD::ZERO_EXTEND, dl, VA.getLocVT(), Val);
 
     Chain = DAG.getCopyToReg(Chain, dl, VA.getLocReg(), Val, Glue);
     Glue = Chain.getValue(1);
@@ -971,10 +1126,173 @@ SDValue McasmTargetLowering::LowerOperation(SDValue Op, SelectionDAG &DAG) const
     return Result;
   }
 
+  case ISD::SIGN_EXTEND_INREG: {
+    // sext_n(x): ((x & mask) ^ bias) - bias for n in {1,8,16}.
+    MVT VT = Op.getSimpleValueType();
+    if (VT != MVT::i32)
+      break;
+    auto *ExtVT = dyn_cast<VTSDNode>(Op.getOperand(1));
+    if (!ExtVT)
+      break;
+    MVT InRegVT = ExtVT->getVT().getSimpleVT();
+    uint32_t Mask = 0;
+    uint32_t Bias = 0;
+    switch (InRegVT.SimpleTy) {
+    case MVT::i1:
+      Mask = 0x1;
+      Bias = 0x1;
+      break;
+    case MVT::i8:
+      Mask = 0xFF;
+      Bias = 0x80;
+      break;
+    case MVT::i16:
+      Mask = 0xFFFF;
+      Bias = 0x8000;
+      break;
+    default:
+      break;
+    }
+    if (Mask == 0)
+      break;
+    SDLoc dl(Op);
+    SDValue V = Op.getOperand(0);
+    SDValue Low = DAG.getNode(ISD::AND, dl, MVT::i32, V,
+                              DAG.getConstant(Mask, dl, MVT::i32));
+    SDValue X = DAG.getNode(ISD::XOR, dl, MVT::i32, Low,
+                            DAG.getConstant(Bias, dl, MVT::i32));
+    return DAG.getNode(ISD::SUB, dl, MVT::i32, X,
+                       DAG.getConstant(Bias, dl, MVT::i32));
+  }
+
+  case ISD::SIGN_EXTEND: {
+    // sext i1 -> i32: 0 - zext(bit)
+    SDLoc dl(Op);
+    EVT ResVT = Op.getValueType();
+    SDValue In = Op.getOperand(0);
+    EVT InVT = In.getValueType();
+
+    auto sextToI32 = [&](SDValue V, EVT VT) -> SDValue {
+      if (VT == MVT::i32)
+        return V;
+      SDValue V32 = DAG.getNode(ISD::ZERO_EXTEND, dl, MVT::i32, V);
+      if (VT == MVT::i1) {
+        return DAG.getNode(ISD::SUB, dl, MVT::i32,
+                           DAG.getConstant(0, dl, MVT::i32), V32);
+      }
+      if (VT == MVT::i8) {
+        SDValue Low = DAG.getNode(ISD::AND, dl, MVT::i32, V32,
+                                  DAG.getConstant(0xFF, dl, MVT::i32));
+        SDValue X = DAG.getNode(ISD::XOR, dl, MVT::i32, Low,
+                                DAG.getConstant(0x80, dl, MVT::i32));
+        return DAG.getNode(ISD::SUB, dl, MVT::i32, X,
+                           DAG.getConstant(0x80, dl, MVT::i32));
+      }
+      if (VT == MVT::i16) {
+        SDValue Low = DAG.getNode(ISD::AND, dl, MVT::i32, V32,
+                                  DAG.getConstant(0xFFFF, dl, MVT::i32));
+        SDValue X = DAG.getNode(ISD::XOR, dl, MVT::i32, Low,
+                                DAG.getConstant(0x8000, dl, MVT::i32));
+        return DAG.getNode(ISD::SUB, dl, MVT::i32, X,
+                           DAG.getConstant(0x8000, dl, MVT::i32));
+      }
+      return SDValue();
+    };
+
+    if (ResVT == MVT::i32) {
+      SDValue S = sextToI32(In, InVT);
+      if (S)
+        return S;
+      break;
+    }
+
+    if (ResVT == MVT::i64) {
+      SDValue Lo = sextToI32(In, InVT);
+      if (!Lo)
+        break;
+      SDValue Hi = DAG.getNode(ISD::SRA, dl, MVT::i32, Lo,
+                               DAG.getConstant(31, dl, MVT::i32));
+      return DAG.getNode(ISD::BUILD_PAIR, dl, MVT::i64, Lo, Hi);
+    }
+    break;
+  }
+
   default:
     break;
   }
   return SDValue(); // operation not handled
+}
+
+void McasmTargetLowering::ReplaceNodeResults(
+    SDNode *N, SmallVectorImpl<SDValue> &Results, SelectionDAG &DAG) const {
+  SDLoc DL(N);
+
+  auto sextToI32 = [&](SDValue V) -> SDValue {
+    EVT VT = V.getValueType();
+    if (VT == MVT::i32)
+      return V;
+
+    SDValue X = DAG.getNode(ISD::ZERO_EXTEND, DL, MVT::i32, V);
+    if (VT == MVT::i1)
+      return DAG.getNode(ISD::SUB, DL, MVT::i32,
+                         DAG.getConstant(0, DL, MVT::i32), X);
+    if (VT == MVT::i8) {
+      SDValue Low = DAG.getNode(ISD::AND, DL, MVT::i32, X,
+                                DAG.getConstant(0xFF, DL, MVT::i32));
+      SDValue BiasX = DAG.getNode(ISD::XOR, DL, MVT::i32, Low,
+                                  DAG.getConstant(0x80, DL, MVT::i32));
+      return DAG.getNode(ISD::SUB, DL, MVT::i32, BiasX,
+                         DAG.getConstant(0x80, DL, MVT::i32));
+    }
+    if (VT == MVT::i16) {
+      SDValue Low = DAG.getNode(ISD::AND, DL, MVT::i32, X,
+                                DAG.getConstant(0xFFFF, DL, MVT::i32));
+      SDValue BiasX = DAG.getNode(ISD::XOR, DL, MVT::i32, Low,
+                                  DAG.getConstant(0x8000, DL, MVT::i32));
+      return DAG.getNode(ISD::SUB, DL, MVT::i32, BiasX,
+                         DAG.getConstant(0x8000, DL, MVT::i32));
+    }
+    return SDValue();
+  };
+
+  switch (N->getOpcode()) {
+  case ISD::SIGN_EXTEND:
+    if (N->getValueType(0) == MVT::i32) {
+      SDValue S = sextToI32(N->getOperand(0));
+      if (S) {
+        Results.push_back(S);
+        return;
+      }
+      break;
+    }
+    if (N->getValueType(0) == MVT::i64) {
+      SDValue Lo = sextToI32(N->getOperand(0));
+      if (!Lo)
+        break;
+      SDValue Hi = DAG.getNode(ISD::SRA, DL, MVT::i32, Lo,
+                               DAG.getConstant(31, DL, MVT::i32));
+      Results.push_back(DAG.getNode(ISD::BUILD_PAIR, DL, MVT::i64, Lo, Hi));
+      return;
+    }
+    break;
+  case ISD::SELECT:
+    if (N->getValueType(0) == MVT::i64) {
+      SDValue Cond = N->getOperand(0);
+      SDValue TV = N->getOperand(1);
+      SDValue FV = N->getOperand(2);
+      auto [TLo, THi] = DAG.SplitScalar(TV, DL, MVT::i32, MVT::i32);
+      auto [FLo, FHi] = DAG.SplitScalar(FV, DL, MVT::i32, MVT::i32);
+      SDValue LoSel = DAG.getNode(ISD::SELECT, DL, MVT::i32, Cond, TLo, FLo);
+      SDValue HiSel = DAG.getNode(ISD::SELECT, DL, MVT::i32, Cond, THi, FHi);
+      Results.push_back(DAG.getNode(ISD::BUILD_PAIR, DL, MVT::i64, LoSel, HiSel));
+      return;
+    }
+    break;
+  default:
+    break;
+  }
+
+  report_fatal_error("mcasm: unhandled custom legalisation node");
 }
 
 SDValue McasmTargetLowering::lowerVASTART(SDValue Op,
@@ -1001,7 +1319,9 @@ SDValue McasmTargetLowering::lowerVASTART(SDValue Op,
   }
 
   // vastart stores the address of the first vararg slot into the va_list.
-  const Value *SV = cast<SrcValueSDNode>(Op.getOperand(2))->getValue();
+  const Value *SV = nullptr;
+  if (auto *SVN = dyn_cast<SrcValueSDNode>(Op.getOperand(2)))
+    SV = SVN->getValue();
   return DAG.getStore(Op.getOperand(0), DL, VarArgsAddr, Op.getOperand(1),
                       MachinePointerInfo(SV));
 }
@@ -1011,7 +1331,9 @@ SDValue McasmTargetLowering::lowerVAARG(SDValue Op, SelectionDAG &DAG) const {
   EVT VT = Node->getValueType(0);
   SDValue Chain = Node->getOperand(0);
   SDValue VAListPtr = Node->getOperand(1);
-  const Value *SV = cast<SrcValueSDNode>(Node->getOperand(2))->getValue();
+  const Value *SV = nullptr;
+  if (auto *SVN = dyn_cast<SrcValueSDNode>(Node->getOperand(2)))
+    SV = SVN->getValue();
   SDLoc DL(Node);
   EVT PtrVT = getPointerTy(DAG.getDataLayout());
 
@@ -1444,21 +1766,60 @@ SDValue McasmTargetLowering::lowerSETCC(SDValue Op, SelectionDAG &DAG) const {
 //
 SDValue McasmTargetLowering::lowerSELECT(SDValue Op, SelectionDAG &DAG) const {
   SDLoc DL(Op);
-  SDValue Cond     = Op.getOperand(0); // 0 or 1
-  SDValue TrueVal  = Op.getOperand(1);
+  SDValue Cond = Op.getOperand(0); // 0 or 1
+  SDValue TrueVal = Op.getOperand(1);
   SDValue FalseVal = Op.getOperand(2);
 
-  if (Op.getSimpleValueType() != MVT::i32)
-    return SDValue();
+  auto materializeFrameIndex = [&](SDValue V) -> SDValue {
+    if (V.getOpcode() != ISD::FrameIndex)
+      return V;
+    auto *FI = cast<FrameIndexSDNode>(V);
+    MachineFunction &MF = DAG.getMachineFunction();
+    const auto *TFI = static_cast<const McasmFrameLowering *>(
+        MF.getSubtarget().getFrameLowering());
+    Register FrameReg;
+    StackOffset Offset = TFI->getFrameIndexReference(MF, FI->getIndex(), FrameReg);
+    SDValue Base = DAG.getRegister(FrameReg, MVT::i32);
+    int64_t Off = Offset.getFixed();
+    if (Off == 0)
+      return Base;
+    return DAG.getNode(ISD::ADD, DL, MVT::i32, Base,
+                       DAG.getConstant(Off, DL, MVT::i32));
+  };
 
-  // neg(Cond) = NOT(Cond) + 1
-  SDValue NotCond = DAG.getNode(ISD::XOR, DL, MVT::i32, Cond,
-                                DAG.getConstant(0xFFFFFFFFU, DL, MVT::i32));
-  SDValue NegCond = DAG.getNode(ISD::ADD, DL, MVT::i32, NotCond,
-                                DAG.getConstant(1, DL, MVT::i32));
-  SDValue Diff = DAG.getNode(ISD::SUB, DL, MVT::i32, TrueVal, FalseVal);
-  SDValue Mask = DAG.getNode(ISD::AND, DL, MVT::i32, NegCond, Diff);
-  return DAG.getNode(ISD::ADD, DL, MVT::i32, FalseVal, Mask);
+  auto selectI32 = [&](SDValue TV, SDValue FV) -> SDValue {
+    TV = materializeFrameIndex(TV);
+    FV = materializeFrameIndex(FV);
+    SDValue Cond32 = Cond;
+    if (Cond32.getValueType() != MVT::i32)
+      Cond32 = DAG.getNode(ISD::ZERO_EXTEND, DL, MVT::i32, Cond32);
+
+    // neg(Cond) = NOT(Cond) + 1
+    SDValue NotCond = DAG.getNode(ISD::XOR, DL, MVT::i32, Cond32,
+                                  DAG.getConstant(0xFFFFFFFFU, DL, MVT::i32));
+    SDValue NegCond = DAG.getNode(ISD::ADD, DL, MVT::i32, NotCond,
+                                  DAG.getConstant(1, DL, MVT::i32));
+    SDValue Diff = DAG.getNode(ISD::SUB, DL, MVT::i32, TV, FV);
+    SDValue Mask = DAG.getNode(ISD::AND, DL, MVT::i32, NegCond, Diff);
+    return DAG.getNode(ISD::ADD, DL, MVT::i32, FV, Mask);
+  };
+
+  if (Op.getSimpleValueType() == MVT::i32)
+    return selectI32(TrueVal, FalseVal);
+
+  if (Op.getSimpleValueType() == MVT::i64) {
+    SDValue C0 = DAG.getConstant(0, DL, MVT::i32);
+    SDValue C1 = DAG.getConstant(1, DL, MVT::i32);
+    SDValue TLo = DAG.getNode(ISD::EXTRACT_ELEMENT, DL, MVT::i32, TrueVal, C0);
+    SDValue THi = DAG.getNode(ISD::EXTRACT_ELEMENT, DL, MVT::i32, TrueVal, C1);
+    SDValue FLo = DAG.getNode(ISD::EXTRACT_ELEMENT, DL, MVT::i32, FalseVal, C0);
+    SDValue FHi = DAG.getNode(ISD::EXTRACT_ELEMENT, DL, MVT::i32, FalseVal, C1);
+    SDValue LoSel = selectI32(TLo, FLo);
+    SDValue HiSel = selectI32(THi, FHi);
+    return DAG.getNode(ISD::BUILD_PAIR, DL, MVT::i64, LoSel, HiSel);
+  }
+
+  return SDValue();
 }
 
 // Helper used by all three *_PARTS lowerings.

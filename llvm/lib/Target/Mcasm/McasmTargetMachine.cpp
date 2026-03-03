@@ -35,6 +35,7 @@
 #include "McasmTargetObjectFile.h"
 #include "McasmMachineFunctionInfo.h"
 #include "llvm/CodeGen/TargetPassConfig.h"
+#include "llvm/CodeGen/Passes.h"
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Pass.h"
 #include "llvm/Support/CodeGen.h"
@@ -192,6 +193,8 @@ public:
   McasmPassConfig(McasmTargetMachine &TM, PassManagerBase &PM)
     : TargetPassConfig(TM, PM) {
     MCASM_DEBUG_LOG("DEBUG: McasmPassConfig constructor\n");
+    disablePass(&BranchFolderPassID);
+    MCASM_DEBUG_LOG("DEBUG: BranchFolderPass disabled\n");
   }
 
   McasmTargetMachine &getMcasmTargetMachine() const {
@@ -279,6 +282,13 @@ public:
     MCASM_DEBUG_LOG("DEBUG: McasmPassConfig::addPreSched2 called\n");
     TargetPassConfig::addPreSched2();
     MCASM_DEBUG_LOG("DEBUG: McasmPassConfig::addPreSched2 completed\n");
+  }
+
+  void addBlockPlacement() override {
+    // Skip generic machine block placement for now.
+    // The current mcasm branch lowering can produce CFG patterns that trigger
+    // assertions in the generic placer.
+    MCASM_DEBUG_LOG("DEBUG: McasmPassConfig::addBlockPlacement skipped\n");
   }
 
   void addPreEmitPass() override {

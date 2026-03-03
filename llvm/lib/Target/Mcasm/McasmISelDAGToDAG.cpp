@@ -18,6 +18,7 @@
 #include "TargetInfo/McasmDebug.h"
 #include "MCTargetDesc/McasmBaseInfo.h"
 #include "Mcasm.h"
+#include "McasmFrameLowering.h"
 #include "McasmSubtarget.h"
 #include "McasmTargetMachine.h"
 #include "llvm/CodeGen/MachineFunction.h"
@@ -95,8 +96,14 @@ INITIALIZE_PASS(McasmDAGToDAGISelLegacy, DEBUG_TYPE, PASS_NAME, false, false)
 void McasmDAGToDAGISel::Select(SDNode *N) {
   SDLoc dl(N);
 
-  MCASM_DEBUG_LOG("DEBUG Select: opcode=%d (ISD::FrameIndex=%d, ISD::CopyToReg=%d, ISD::CopyFromReg=%d)\n",
-          N->getOpcode(), ISD::FrameIndex, ISD::CopyToReg, ISD::CopyFromReg);
+  std::string OpName = N->getOperationName(CurDAG);
+  std::string VTStr =
+      N->getNumValues() ? N->getValueType(0).getEVTString() : "-";
+  MCASM_DEBUG_LOG(
+      "DEBUG Select: opcode=%d name=%s vt=%s (FrameIndex=%d, CopyToReg=%d, "
+      "CopyFromReg=%d)\n",
+      N->getOpcode(), OpName.c_str(), VTStr.c_str(), ISD::FrameIndex,
+      ISD::CopyToReg, ISD::CopyFromReg);
   if (N->getOpcode() == ISD::CopyToReg && N->getNumOperands() > 2) {
     SDValue Val = N->getOperand(2);
     MCASM_DEBUG_LOG("DEBUG Select: CopyToReg value opcode=%d\n", Val.getOpcode());
@@ -112,19 +119,46 @@ void McasmDAGToDAGISel::Select(SDNode *N) {
     return;
   }
 
-  // Handle FrameIndex nodes specially
-  // FrameIndex represents stack allocation and should be materialized as
-  // a base address (rsp + offset), not selected as a regular instruction
+  // Materialize FrameIndex values as concrete frame addresses when they flow as
+  // SSA values (e.g. PHI/select of alloca pointers). Keep pure load/store
+  // address uses as FrameIndex so normal FI elimination handles them.
   if (N->getOpcode() == ISD::FrameIndex) {
-    MCASM_DEBUG_LOG("DEBUG Select: handling FrameIndex\n");
-    // FrameIndex will be replaced during register allocation
-    // by eliminateFrameIndex in McasmRegisterInfo.cpp
-    // Just convert it to a TargetFrameIndex for now
-    auto FI = cast<FrameIndexSDNode>(N);
-    SDValue TFI = CurDAG->getTargetFrameIndex(
-        FI->getIndex(), MVT::i32);
-    ReplaceNode(N, TFI.getNode());
-    MCASM_DEBUG_LOG("DEBUG Select: FrameIndex handled successfully\n");
+    auto *FI = cast<FrameIndexSDNode>(N);
+    bool HasNonAddrUse = false;
+    for (SDUse &U : N->uses()) {
+      SDNode *User = U.getUser();
+      unsigned OpNo = U.getOperandNo();
+      bool IsAddrUse = (User->getOpcode() == ISD::LOAD && OpNo == 1) ||
+                       (User->getOpcode() == ISD::STORE && OpNo == 2);
+      if (!IsAddrUse) {
+        HasNonAddrUse = true;
+        break;
+      }
+    }
+
+    if (!HasNonAddrUse) {
+      SDValue TFI =
+          CurDAG->getTargetFrameIndex(FI->getIndex(), MVT::i32);
+      ReplaceNode(N, TFI.getNode());
+      return;
+    }
+
+    MachineFunction &MF = CurDAG->getMachineFunction();
+    const auto *TFI = static_cast<const McasmFrameLowering *>(
+        MF.getSubtarget().getFrameLowering());
+    Register FrameReg;
+    StackOffset Offset =
+        TFI->getFrameIndexReference(MF, FI->getIndex(), FrameReg);
+    SDLoc DL(N);
+    SDValue Base = CurDAG->getRegister(FrameReg, MVT::i32);
+    int64_t Off = Offset.getFixed();
+    if (Off == 0) {
+      ReplaceNode(N, Base.getNode());
+      return;
+    }
+    SDValue Imm = CurDAG->getTargetConstant(Off, DL, MVT::i32);
+    SDNode *Add = CurDAG->getMachineNode(Mcasm::ADD32ri, DL, MVT::i32, Base, Imm);
+    ReplaceNode(N, Add);
     return;
   }
 

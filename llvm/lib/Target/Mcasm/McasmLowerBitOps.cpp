@@ -38,7 +38,8 @@ char McasmLowerBitOpsPass::ID = 0;
 static bool isRuntimeFunctionName(StringRef N) {
   return N == "__bit_and" || N == "__bit_or" || N == "__bit_xor" ||
          N == "__bit_not" || N == "__bit_shl" || N == "__bit_shr" ||
-         N == "__bit_sar" || N == "__pow2u";
+         N == "__bit_sar" || N == "__pow2u" || N == "__adddi3" ||
+         N == "__subdi3";
 }
 
 static FunctionCallee getFn(Module &M, StringRef Name, Type *RetTy,
@@ -51,6 +52,30 @@ static bool isAllOnesI32(Value *V) {
   return CI && CI->getType()->isIntegerTy(32) && CI->isMinusOne();
 }
 
+static ConstantInt *getRepresentableSignedNarrowConst(ConstantInt *CI64,
+                                                      IntegerType *DstTy) {
+  if (!CI64 || !CI64->getType()->isIntegerTy(64) || !DstTy)
+    return nullptr;
+  unsigned BW = DstTy->getBitWidth();
+  APInt Narrow = CI64->getValue().trunc(BW);
+  if (Narrow.sext(64) != CI64->getValue())
+    return nullptr;
+  return cast<ConstantInt>(ConstantInt::get(DstTy, Narrow));
+}
+
+static bool matchSExtToI64(Value *V, Value *&Src, IntegerType *&SrcTy) {
+  auto *SI = dyn_cast<SExtInst>(V);
+  if (!SI)
+    return false;
+  if (!SI->getType()->isIntegerTy(64))
+    return false;
+  SrcTy = dyn_cast<IntegerType>(SI->getSrcTy());
+  if (!SrcTy || SrcTy->getBitWidth() > 32)
+    return false;
+  Src = SI->getOperand(0);
+  return true;
+}
+
 bool McasmLowerBitOpsPass::runOnModule(Module &M) {
   bool Changed = false;
 
@@ -59,6 +84,7 @@ bool McasmLowerBitOpsPass::runOnModule(Module &M) {
 
   LLVMContext &Ctx = M.getContext();
   Type *I32 = Type::getInt32Ty(Ctx);
+  Type *I64 = Type::getInt64Ty(Ctx);
 
   FunctionCallee BitAnd = getFn(M, "__bit_and", I32, {I32, I32});
   FunctionCallee BitOr = getFn(M, "__bit_or", I32, {I32, I32});
@@ -67,6 +93,8 @@ bool McasmLowerBitOpsPass::runOnModule(Module &M) {
   FunctionCallee BitShl = getFn(M, "__bit_shl", I32, {I32, I32});
   FunctionCallee BitShr = getFn(M, "__bit_shr", I32, {I32, I32});
   FunctionCallee BitSar = getFn(M, "__bit_sar", I32, {I32, I32});
+  FunctionCallee AddDi3 = getFn(M, "__adddi3", I64, {I64, I64});
+  FunctionCallee SubDi3 = getFn(M, "__subdi3", I64, {I64, I64});
 
   // mcasm uses 32-bit scalar storage slots. Rewrite i8/i16 memory operations
   // to i32 loads/stores in IR to avoid subword SelectionDAG paths.
@@ -125,10 +153,116 @@ bool McasmLowerBitOpsPass::runOnModule(Module &M) {
     if (F.isDeclaration() || isRuntimeFunctionName(F.getName()))
       continue;
 
+    SmallVector<PHINode *, 16> PhisToErase;
     for (BasicBlock &BB : F) {
       for (Instruction &I : BB) {
+        if (auto *Sel = dyn_cast<SelectInst>(&I)) {
+          if (!Sel->getType()->isIntegerTy(64))
+            continue;
+
+          Value *Src = nullptr, *Other = nullptr;
+          IntegerType *SrcTy = nullptr;
+          Value *TrueV = Sel->getTrueValue();
+          Value *FalseV = Sel->getFalseValue();
+
+          bool TrueIsSExt = matchSExtToI64(TrueV, Src, SrcTy);
+          if (TrueIsSExt) {
+            Other = FalseV;
+          } else {
+            bool FalseIsSExt = matchSExtToI64(FalseV, Src, SrcTy);
+            if (!FalseIsSExt)
+              continue;
+            Other = TrueV;
+          }
+          auto *OtherCI = dyn_cast<ConstantInt>(Other);
+          ConstantInt *NarrowC = getRepresentableSignedNarrowConst(OtherCI, SrcTy);
+          if (!NarrowC)
+            continue;
+
+          IRBuilder<> B(Sel);
+          Value *NarrowSel = TrueIsSExt
+                                 ? B.CreateSelect(Sel->getCondition(), Src, NarrowC)
+                                 : B.CreateSelect(Sel->getCondition(), NarrowC, Src);
+          Value *Wide = B.CreateSExt(NarrowSel, I64);
+          Sel->replaceAllUsesWith(Wide);
+          ToErase.push_back(Sel);
+          Changed = true;
+          continue;
+        }
+
+        if (auto *Phi = dyn_cast<PHINode>(&I)) {
+          if (!Phi->getType()->isIntegerTy(64))
+            continue;
+          if (Phi->getNumIncomingValues() < 2)
+            continue;
+
+          IntegerType *SrcTy = nullptr;
+          bool Valid = true;
+          bool HasSExtArm = false;
+          SmallVector<ConstantInt *, 4> PendingConsts;
+          for (unsigned Idx = 0; Idx < Phi->getNumIncomingValues(); ++Idx) {
+            BasicBlock *Pred = Phi->getIncomingBlock(Idx);
+            if (Pred == Phi->getParent()) {
+              Valid = false;
+              break;
+            }
+            Value *InV = Phi->getIncomingValue(Idx);
+            Value *Src = nullptr;
+            IntegerType *ThisTy = nullptr;
+            if (matchSExtToI64(InV, Src, ThisTy)) {
+              HasSExtArm = true;
+              if (!SrcTy)
+                SrcTy = ThisTy;
+              else if (SrcTy != ThisTy) {
+                Valid = false;
+                break;
+              }
+              continue;
+            }
+            auto *CI = dyn_cast<ConstantInt>(InV);
+            if (!CI || !CI->getType()->isIntegerTy(64)) {
+              Valid = false;
+              break;
+            }
+            PendingConsts.push_back(CI);
+          }
+          if (!Valid || !HasSExtArm || !SrcTy)
+            continue;
+          for (ConstantInt *CI : PendingConsts) {
+            if (!getRepresentableSignedNarrowConst(CI, SrcTy)) {
+              Valid = false;
+              break;
+            }
+          }
+          if (!Valid)
+            continue;
+
+          auto *NarrowPhi = PHINode::Create(
+              SrcTy, Phi->getNumIncomingValues(), Phi->getName() + ".narrow", Phi);
+          for (unsigned Idx = 0; Idx < Phi->getNumIncomingValues(); ++Idx) {
+            Value *InV = Phi->getIncomingValue(Idx);
+            Value *Src = nullptr;
+            IntegerType *ThisTy = nullptr;
+            if (matchSExtToI64(InV, Src, ThisTy)) {
+              NarrowPhi->addIncoming(Src, Phi->getIncomingBlock(Idx));
+            } else {
+              auto *CI = cast<ConstantInt>(InV);
+              NarrowPhi->addIncoming(
+                  getRepresentableSignedNarrowConst(CI, SrcTy),
+                  Phi->getIncomingBlock(Idx));
+            }
+          }
+          Instruction *InsertPt = Phi->getParent()->getFirstNonPHI();
+          IRBuilder<> B(InsertPt);
+          Value *Wide = B.CreateSExt(NarrowPhi, I64);
+          Phi->replaceAllUsesWith(Wide);
+          PhisToErase.push_back(Phi);
+          Changed = true;
+          continue;
+        }
+
         auto *BO = dyn_cast<BinaryOperator>(&I);
-        if (!BO || !BO->getType()->isIntegerTy(32))
+        if (!BO)
           continue;
 
         IRBuilder<> B(BO);
@@ -136,32 +270,51 @@ bool McasmLowerBitOpsPass::runOnModule(Module &M) {
         Value *R = BO->getOperand(1);
         Value *NewV = nullptr;
 
-        switch (BO->getOpcode()) {
-        case Instruction::And:
-          NewV = B.CreateCall(BitAnd, {L, R});
-          break;
-        case Instruction::Or:
-          NewV = B.CreateCall(BitOr, {L, R});
-          break;
-        case Instruction::Xor:
-          if (isAllOnesI32(L))
-            NewV = B.CreateCall(BitNot, {R});
-          else if (isAllOnesI32(R))
-            NewV = B.CreateCall(BitNot, {L});
-          else
-            NewV = B.CreateCall(BitXor, {L, R});
-          break;
-        case Instruction::Shl:
-          NewV = B.CreateCall(BitShl, {L, R});
-          break;
-        case Instruction::LShr:
-          NewV = B.CreateCall(BitShr, {L, R});
-          break;
-        case Instruction::AShr:
-          NewV = B.CreateCall(BitSar, {L, R});
-          break;
-        default:
-          break;
+        if (BO->getType()->isIntegerTy(64)) {
+          switch (BO->getOpcode()) {
+          case Instruction::Add:
+            NewV = B.CreateCall(AddDi3, {L, R});
+            break;
+          case Instruction::Sub:
+            NewV = B.CreateCall(SubDi3, {L, R});
+            break;
+          default:
+            break;
+          }
+        } else if (!BO->getType()->isIntegerTy(32)) {
+          continue;
+        }
+
+        if (!NewV) {
+          if (!BO->getType()->isIntegerTy(32))
+            continue;
+          switch (BO->getOpcode()) {
+          case Instruction::And:
+            NewV = B.CreateCall(BitAnd, {L, R});
+            break;
+          case Instruction::Or:
+            NewV = B.CreateCall(BitOr, {L, R});
+            break;
+          case Instruction::Xor:
+            if (isAllOnesI32(L))
+              NewV = B.CreateCall(BitNot, {R});
+            else if (isAllOnesI32(R))
+              NewV = B.CreateCall(BitNot, {L});
+            else
+              NewV = B.CreateCall(BitXor, {L, R});
+            break;
+          case Instruction::Shl:
+            NewV = B.CreateCall(BitShl, {L, R});
+            break;
+          case Instruction::LShr:
+            NewV = B.CreateCall(BitShr, {L, R});
+            break;
+          case Instruction::AShr:
+            NewV = B.CreateCall(BitSar, {L, R});
+            break;
+          default:
+            break;
+          }
         }
 
         if (!NewV)
@@ -171,6 +324,10 @@ bool McasmLowerBitOpsPass::runOnModule(Module &M) {
         Changed = true;
       }
     }
+
+    for (auto It = PhisToErase.rbegin(), End = PhisToErase.rend(); It != End;
+         ++It)
+      (*It)->eraseFromParent();
   }
 
   for (auto It = ToErase.rbegin(), End = ToErase.rend(); It != End; ++It)
