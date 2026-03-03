@@ -213,7 +213,7 @@ let isCall = 1 in
   // a use to prevent stack-pointer assignments that appear immediately
   // before calls from potentially appearing dead. Uses for argument
   // registers are added manually.
-  let Uses = [ESP, SSP] in {
+  let Uses = [ESP, SSP], Defs = [rax, t0] in {
     def CALLpcrel32 : Ii32PCRel<0xE8, RawFrm,
                            (outs), (ins i32imm_brtarget:$dst),
                            "call{l}\t$dst", []>,

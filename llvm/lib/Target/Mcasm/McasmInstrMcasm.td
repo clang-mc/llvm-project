@@ -173,12 +173,12 @@ let isBarrier = 1, isBranch = 1, isTerminator = 1 in {
 // Note: mcasm CALL does NOT modify stack (different from x86)
 // From clang-mc.wiki: Direct call to known label
 // isPseudo=0 so AsmPrinter doesn't skip it
-let isCall = 1, isPseudo = 0, isCodeGenOnly = 0, Defs = [rax], Uses = [rsp] in
+let isCall = 1, isPseudo = 0, isCodeGenOnly = 0, Defs = [rax, t0], Uses = [rsp] in
 def PseudoCALL : Pseudo<(outs), (ins bare_symbol:$dst),
                         [(Mcasmcall tglobaladdr:$dst)],
                         "call\t$dst">;
 
-let isCall = 1, isPseudo = 0, isCodeGenOnly = 0, Defs = [rax], Uses = [rsp] in
+let isCall = 1, isPseudo = 0, isCodeGenOnly = 0, Defs = [rax, t0], Uses = [rsp] in
 def PseudoCALL_extern : Pseudo<(outs), (ins bare_symbol:$dst),
                                [(Mcasmcall texternalsym:$dst)],
                                "call\t$dst">;
@@ -202,10 +202,11 @@ let isCall = 1, isTerminator = 1, isReturn = 1, isBarrier = 1,
 //===----------------------------------------------------------------------===//
 
 // RET - Real mcasm return instruction (not pseudo)
-// mcasm RET has NO parameters - caller cleanup is done by caller with ADD/POP
-let isTerminator = 1, isReturn = 1, isBarrier = 1, hasCtrlDep = 1,
-    Uses = [rax] in {
-  def RET : I<0xC3, RawFrm, (outs), (ins), "ret", [(Mcasmretglue)]>;
+// mcasm RET has NO explicit parameters; return registers are carried as
+// variable_ops from Mcasmretglue when needed.
+let isTerminator = 1, isReturn = 1, isBarrier = 1, hasCtrlDep = 1 in {
+  def RET : I<0xC3, RawFrm, (outs), (ins variable_ops), "ret",
+              [(Mcasmretglue)]>;
 }
 
 //===----------------------------------------------------------------------===//
@@ -239,14 +240,14 @@ def MOVD32mi : Ii32<0xC8, MRM0m, (outs), (ins i32mem:$dst, i32imm:$src),
 // More expensive than CALL, use cautiously
 
 // CALLD register
-let isCall = 1, Uses = [rsp] in {
+let isCall = 1, Defs = [rax, t0], Uses = [rsp] in {
   def CALLD32r : I<0xFF, MRM2r, (outs), (ins GR32:$dst),
                    "calld\t$dst",
                    [(Mcasmcall GR32:$dst)]>;
 }
 
 // CALLD memory
-let isCall = 1, Uses = [rsp] in {
+let isCall = 1, Defs = [rax, t0], Uses = [rsp] in {
   def CALLD32m : I<0xFF, MRM2m, (outs), (ins i32mem:$dst),
                    "calld\t$dst",
                    [(Mcasmcall (load addr:$dst))]>;

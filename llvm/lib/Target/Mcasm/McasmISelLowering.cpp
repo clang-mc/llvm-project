@@ -860,6 +860,25 @@ SDValue McasmTargetLowering::LowerOperation(SDValue Op, SelectionDAG &DAG) const
     SDValue ByteOffset = Op.getOperand(1);
     EVT PtrVT = Op.getValueType();  // Preserve the pointer type
 
+    // Do not materialize FrameIndex directly as ADD src1 for two-address ADD32ri.
+    // Machine verifier requires tied src1 to be a register, not %stack.N.
+    if (Ptr.getOpcode() == ISD::FrameIndex) {
+      auto *FI = cast<FrameIndexSDNode>(Ptr);
+      MachineFunction &MF = DAG.getMachineFunction();
+      const auto *TFI = static_cast<const McasmFrameLowering *>(
+          MF.getSubtarget().getFrameLowering());
+      Register FrameReg;
+      StackOffset Offset = TFI->getFrameIndexReference(MF, FI->getIndex(), FrameReg);
+
+      SDValue Base = DAG.getRegister(FrameReg, PtrVT);
+      int64_t FixedOff = Offset.getFixed();
+      if (FixedOff != 0) {
+        Base = DAG.getNode(ISD::ADD, dl, PtrVT, Base,
+                           DAG.getConstant(FixedOff, dl, PtrVT));
+      }
+      Ptr = Base;
+    }
+
     // Convert byte offset to mcasm address units (divide by 4)
     SDValue McasmOffset;
     if (ConstantSDNode *C = dyn_cast<ConstantSDNode>(ByteOffset)) {
