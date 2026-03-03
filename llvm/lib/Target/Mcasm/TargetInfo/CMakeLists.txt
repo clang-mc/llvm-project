@@ -1,5 +1,6 @@
-add_llvm_component_library(LLVMMcasmInfo
+﻿add_llvm_component_library(LLVMMcasmInfo
   McasmTargetInfo.cpp
+  McasmDebug.cpp
 
   LINK_COMPONENTS
   MC
@@ -8,3 +9,4 @@ add_llvm_component_library(LLVMMcasmInfo
   ADD_TO_COMPONENT
   Mcasm
   )
+

@@ -1,4 +1,4 @@
-//===-- McasmInstrInfo.cpp - Mcasm Instruction Information ----------------===//
+﻿//===-- McasmInstrInfo.cpp - Mcasm Instruction Information ----------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -13,6 +13,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "McasmInstrInfo.h"
+#include "TargetInfo/McasmDebug.h"
 #include "Mcasm.h"
 #include "McasmSubtarget.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
@@ -37,8 +38,7 @@ static MachineInstrBuilder &addFrameReference(MachineInstrBuilder &MIB,
 McasmInstrInfo::McasmInstrInfo(const McasmSubtarget &STI)
     : McasmGenInstrInfo(STI, RI, -1, -1, -1, -1),
       RI(STI.getTargetTriple()) {  // Construct RI with Triple
-  fprintf(stderr, "DEBUG: McasmInstrInfo constructor called\n");
-  fflush(stderr);
+  MCASM_DEBUG_LOG("DEBUG: McasmInstrInfo constructor called\n");
 }
 
 void McasmInstrInfo::copyPhysReg(MachineBasicBlock &MBB,
@@ -95,3 +95,4 @@ static MachineInstrBuilder &addFrameReference(MachineInstrBuilder &MIB,
       .addReg(0);         // SegmentReg
   return MIB;
 }
+

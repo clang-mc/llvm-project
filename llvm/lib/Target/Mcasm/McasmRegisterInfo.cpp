@@ -1,4 +1,4 @@
-//===-- McasmRegisterInfo.cpp - Mcasm Register Information ----------------===//
+﻿//===-- McasmRegisterInfo.cpp - Mcasm Register Information ----------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -15,6 +15,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "McasmRegisterInfo.h"
+#include "TargetInfo/McasmDebug.h"
 #include "Mcasm.h"
 #include "McasmFrameLowering.h"
 #include "McasmInstrInfo.h"
@@ -72,8 +73,7 @@ McasmRegisterInfo::getReservedRegs(const MachineFunction &MF) const {
 bool McasmRegisterInfo::eliminateFrameIndex(MachineBasicBlock::iterator II,
                                             int SPAdj, unsigned FIOperandNum,
                                             RegScavenger *RS) const {
-  fprintf(stderr, "DEBUG eliminateFrameIndex: called, FIOperandNum=%u\n", FIOperandNum);
-  fflush(stderr);
+  MCASM_DEBUG_LOG("DEBUG eliminateFrameIndex: called, FIOperandNum=%u\n", FIOperandNum);
 
   MachineInstr &MI = *II;
   MachineFunction &MF = *MI.getParent()->getParent();
@@ -82,12 +82,13 @@ bool McasmRegisterInfo::eliminateFrameIndex(MachineBasicBlock::iterator II,
 
   int FrameIndex = MI.getOperand(FIOperandNum).getIndex();
   unsigned NumOperands = MI.getNumOperands();
-  fprintf(stderr, "DEBUG eliminateFrameIndex: FrameIndex=%d, Opcode=%u, NumOperands=%u, FIOperandNum=%u\n",
+  MCASM_DEBUG_LOG("DEBUG eliminateFrameIndex: FrameIndex=%d, Opcode=%u, NumOperands=%u, FIOperandNum=%u\n",
           FrameIndex, MI.getOpcode(), NumOperands, FIOperandNum);
-  fprintf(stderr, "DEBUG eliminateFrameIndex: Instruction: ");
-  MI.print(llvm::errs());
-  fprintf(stderr, "\n");
-  fflush(stderr);
+  if (McasmDebug::isEnabled()) {
+    MCASM_DEBUG_LOG("DEBUG eliminateFrameIndex: Instruction: ");
+    MI.print(llvm::errs());
+    MCASM_DEBUG_LOG("\n");
+  }
 
   // Get the frame index reference (in mcasm units)
   Register FrameReg;
@@ -105,8 +106,7 @@ bool McasmRegisterInfo::eliminateFrameIndex(MachineBasicBlock::iterator II,
     // Not a memory operand format (doesn't have 5 operands after FI)
     // This is likely an ALU instruction like ADD32ri with FrameIndex
     // For computing addresses like &stack_var + offset
-    fprintf(stderr, "DEBUG eliminateFrameIndex: Special case - ALU with FrameIndex (address calculation)\n");
-    fflush(stderr);
+    MCASM_DEBUG_LOG("DEBUG eliminateFrameIndex: Special case - ALU with FrameIndex (address calculation)\n");
 
     // For ADD32ri with FrameIndex, we need to:
     // 1. Insert MOV dst, FrameReg
@@ -125,7 +125,7 @@ bool McasmRegisterInfo::eliminateFrameIndex(MachineBasicBlock::iterator II,
     // Insert: MOV DstReg, FrameReg
     BuildMI(MBB, II, DL, TII->get(Mcasm::MOV32rr), DstReg)
         .addReg(FrameReg);
-    fprintf(stderr, "DEBUG eliminateFrameIndex: Inserted MOV %u, %u\n",
+    MCASM_DEBUG_LOG("DEBUG eliminateFrameIndex: Inserted MOV %u, %u\n",
             DstReg.id(), FrameReg.id());
 
     // Now replace FrameIndex with DstReg (for two-address form)
@@ -135,12 +135,11 @@ bool McasmRegisterInfo::eliminateFrameIndex(MachineBasicBlock::iterator II,
     if (FIOperandNum + 1 < NumOperands && MI.getOperand(FIOperandNum + 1).isImm()) {
       int64_t OldImm = MI.getOperand(FIOperandNum + 1).getImm();
       MI.getOperand(FIOperandNum + 1).setImm(OldImm + McasmOffset);
-      fprintf(stderr, "DEBUG eliminateFrameIndex: Adjusted immediate from %lld to %lld\n",
+      MCASM_DEBUG_LOG("DEBUG eliminateFrameIndex: Adjusted immediate from %lld to %lld\n",
               (long long)OldImm, (long long)(OldImm + McasmOffset));
     }
 
-    fprintf(stderr, "DEBUG eliminateFrameIndex: ALU case completed\n");
-    fflush(stderr);
+    MCASM_DEBUG_LOG("DEBUG eliminateFrameIndex: ALU case completed\n");
     return false;
   }
 
@@ -148,39 +147,32 @@ bool McasmRegisterInfo::eliminateFrameIndex(MachineBasicBlock::iterator II,
   // Replace FrameIndex with FrameReg + McasmOffset
   // The instruction format is: [BaseReg + Scale*IndexReg + Disp + Segment]
   // For mcasm: [rsp + 0*0 + McasmOffset + 0]
-  fprintf(stderr, "DEBUG eliminateFrameIndex: Normal memory operand case\n");
-  fprintf(stderr, "DEBUG eliminateFrameIndex: About to replace with FrameReg=%u, McasmOffset=%lld\n",
+  MCASM_DEBUG_LOG("DEBUG eliminateFrameIndex: Normal memory operand case\n");
+  MCASM_DEBUG_LOG("DEBUG eliminateFrameIndex: About to replace with FrameReg=%u, McasmOffset=%lld\n",
           FrameReg.id(), (long long)McasmOffset);
-  fprintf(stderr, "DEBUG eliminateFrameIndex: Operand types: FI=%d, FI+1=%d, FI+2=%d, FI+3=%d, FI+4=%d\n",
+  MCASM_DEBUG_LOG("DEBUG eliminateFrameIndex: Operand types: FI=%d, FI+1=%d, FI+2=%d, FI+3=%d, FI+4=%d\n",
           MI.getOperand(FIOperandNum).getType(),
           MI.getOperand(FIOperandNum + 1).getType(),
           MI.getOperand(FIOperandNum + 2).getType(),
           MI.getOperand(FIOperandNum + 3).getType(),
           MI.getOperand(FIOperandNum + 4).getType());
-  fflush(stderr);
 
   MI.getOperand(FIOperandNum).ChangeToRegister(FrameReg, false);
-  fprintf(stderr, "DEBUG eliminateFrameIndex: Changed operand 0\n");
-  fflush(stderr);
+  MCASM_DEBUG_LOG("DEBUG eliminateFrameIndex: Changed operand 0\n");
 
   MI.getOperand(FIOperandNum + 1).ChangeToImmediate(1);           // Scale = 1
-  fprintf(stderr, "DEBUG eliminateFrameIndex: Changed operand 1\n");
-  fflush(stderr);
+  MCASM_DEBUG_LOG("DEBUG eliminateFrameIndex: Changed operand 1\n");
 
   MI.getOperand(FIOperandNum + 2).ChangeToRegister(0, false);     // IndexReg = 0
-  fprintf(stderr, "DEBUG eliminateFrameIndex: Changed operand 2\n");
-  fflush(stderr);
+  MCASM_DEBUG_LOG("DEBUG eliminateFrameIndex: Changed operand 2\n");
 
   MI.getOperand(FIOperandNum + 3).ChangeToImmediate(McasmOffset); // Displacement
-  fprintf(stderr, "DEBUG eliminateFrameIndex: Changed operand 3\n");
-  fflush(stderr);
+  MCASM_DEBUG_LOG("DEBUG eliminateFrameIndex: Changed operand 3\n");
 
   MI.getOperand(FIOperandNum + 4).ChangeToRegister(0, false);     // Segment = 0
-  fprintf(stderr, "DEBUG eliminateFrameIndex: Changed operand 4\n");
-  fflush(stderr);
+  MCASM_DEBUG_LOG("DEBUG eliminateFrameIndex: Changed operand 4\n");
 
-  fprintf(stderr, "DEBUG eliminateFrameIndex: Normal case completed\n");
-  fflush(stderr);
+  MCASM_DEBUG_LOG("DEBUG eliminateFrameIndex: Normal case completed\n");
   return false;
 }
 
@@ -189,3 +181,4 @@ McasmRegisterInfo::getFrameRegister(const MachineFunction &MF) const {
   // mcasm always uses rsp (no frame pointer)
   return Mcasm::rsp;
 }
+

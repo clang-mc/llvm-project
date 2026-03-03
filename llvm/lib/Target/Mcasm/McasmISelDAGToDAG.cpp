@@ -1,4 +1,4 @@
-//===-- McasmISelDAGToDAG.cpp - Mcasm DAG->DAG Instruction Selector ------===//
+﻿//===-- McasmISelDAGToDAG.cpp - Mcasm DAG->DAG Instruction Selector ------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -15,6 +15,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "McasmISelDAGToDAG.h"
+#include "TargetInfo/McasmDebug.h"
 #include "MCTargetDesc/McasmBaseInfo.h"
 #include "Mcasm.h"
 #include "McasmSubtarget.h"
@@ -42,8 +43,7 @@ public:
 
   explicit McasmDAGToDAGISel(McasmTargetMachine &TM, CodeGenOptLevel OptLevel)
       : SelectionDAGISel(TM, OptLevel) {
-    fprintf(stderr, "DEBUG: McasmDAGToDAGISel constructor completed\n");
-    fflush(stderr);
+    MCASM_DEBUG_LOG("DEBUG: McasmDAGToDAGISel constructor completed\n");
   }
 
   bool runOnMachineFunction(MachineFunction &MF) override {
@@ -81,8 +81,7 @@ public:
                                     CodeGenOptLevel OptLevel)
       : SelectionDAGISelLegacy(
             ID, std::make_unique<McasmDAGToDAGISel>(TM, OptLevel)) {
-    fprintf(stderr, "DEBUG: McasmDAGToDAGISelLegacy constructor completed\n");
-    fflush(stderr);
+    MCASM_DEBUG_LOG("DEBUG: McasmDAGToDAGISelLegacy constructor completed\n");
   }
 };
 
@@ -96,16 +95,15 @@ INITIALIZE_PASS(McasmDAGToDAGISelLegacy, DEBUG_TYPE, PASS_NAME, false, false)
 void McasmDAGToDAGISel::Select(SDNode *N) {
   SDLoc dl(N);
 
-  fprintf(stderr, "DEBUG Select: opcode=%d (ISD::FrameIndex=%d, ISD::CopyToReg=%d, ISD::CopyFromReg=%d)\n",
+  MCASM_DEBUG_LOG("DEBUG Select: opcode=%d (ISD::FrameIndex=%d, ISD::CopyToReg=%d, ISD::CopyFromReg=%d)\n",
           N->getOpcode(), ISD::FrameIndex, ISD::CopyToReg, ISD::CopyFromReg);
   if (N->getOpcode() == ISD::CopyToReg && N->getNumOperands() > 2) {
     SDValue Val = N->getOperand(2);
-    fprintf(stderr, "DEBUG Select: CopyToReg value opcode=%d\n", Val.getOpcode());
+    MCASM_DEBUG_LOG("DEBUG Select: CopyToReg value opcode=%d\n", Val.getOpcode());
     if (Val.getOpcode() == ISD::FrameIndex) {
-      fprintf(stderr, "DEBUG Select: **CopyToReg with FrameIndex operand!**\n");
+      MCASM_DEBUG_LOG("DEBUG Select: **CopyToReg with FrameIndex operand!**\n");
     }
   }
-  fflush(stderr);
 
   // If we have a custom node, we already have selected!
   if (N->isMachineOpcode()) {
@@ -118,8 +116,7 @@ void McasmDAGToDAGISel::Select(SDNode *N) {
   // FrameIndex represents stack allocation and should be materialized as
   // a base address (rsp + offset), not selected as a regular instruction
   if (N->getOpcode() == ISD::FrameIndex) {
-    fprintf(stderr, "DEBUG Select: handling FrameIndex\n");
-    fflush(stderr);
+    MCASM_DEBUG_LOG("DEBUG Select: handling FrameIndex\n");
     // FrameIndex will be replaced during register allocation
     // by eliminateFrameIndex in McasmRegisterInfo.cpp
     // Just convert it to a TargetFrameIndex for now
@@ -127,19 +124,16 @@ void McasmDAGToDAGISel::Select(SDNode *N) {
     SDValue TFI = CurDAG->getTargetFrameIndex(
         FI->getIndex(), MVT::i32);
     ReplaceNode(N, TFI.getNode());
-    fprintf(stderr, "DEBUG Select: FrameIndex handled successfully\n");
-    fflush(stderr);
+    MCASM_DEBUG_LOG("DEBUG Select: FrameIndex handled successfully\n");
     return;
   }
 
-  fprintf(stderr, "DEBUG Select: calling SelectCode\n");
-  fflush(stderr);
+  MCASM_DEBUG_LOG("DEBUG Select: calling SelectCode\n");
   // Use the default select (which includes TableGen-generated matching)
   // Direct calls will be matched by CALL32 patterns
   // Indirect calls will be matched by CALLD patterns
   SelectCode(N);
-  fprintf(stderr, "DEBUG Select: SelectCode returned\n");
-  fflush(stderr);
+  MCASM_DEBUG_LOG("DEBUG Select: SelectCode returned\n");
 }
 
 /// SelectAddr - Address Selection for mcasm.
@@ -180,10 +174,9 @@ bool McasmDAGToDAGISel::SelectInlineAsmMemoryOperand(
 
 FunctionPass *llvm::createMcasmISelDag(McasmTargetMachine &TM,
                                         CodeGenOptLevel OptLevel) {
-  fprintf(stderr, "DEBUG: createMcasmISelDag called\n");
-  fflush(stderr);
+  MCASM_DEBUG_LOG("DEBUG: createMcasmISelDag called\n");
   auto *Pass = new McasmDAGToDAGISelLegacy(TM, OptLevel);
-  fprintf(stderr, "DEBUG: createMcasmISelDag completed, Pass=%p\n", (void*)Pass);
-  fflush(stderr);
+  MCASM_DEBUG_LOG("DEBUG: createMcasmISelDag completed, Pass=%p\n", (void*)Pass);
   return Pass;
 }
+

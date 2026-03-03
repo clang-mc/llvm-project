@@ -1,4 +1,4 @@
-//===-- McasmTargetInfo.cpp - Mcasm Target Implementation ---------------------===//
+﻿//===-- McasmTargetInfo.cpp - Mcasm Target Implementation ---------------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -7,6 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "TargetInfo/McasmTargetInfo.h"
+#include "TargetInfo/McasmDebug.h"
 #include "llvm-c/Visibility.h"
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Support/raw_ostream.h"
@@ -18,16 +19,14 @@ Target &llvm::getTheMcasm_32Target() {
 }
 
 extern "C" LLVM_C_ABI void LLVMInitializeMcasmTargetInfo() {
-  fprintf(stderr, "DEBUG: LLVMInitializeMcasmTargetInfo called\n");
-  fflush(stderr);
+  MCASM_DEBUG_LOG("DEBUG: LLVMInitializeMcasmTargetInfo called\n");
 
-  fprintf(stderr, "DEBUG: About to create RegisterTarget\n");
-  fflush(stderr);
+  MCASM_DEBUG_LOG("DEBUG: About to create RegisterTarget\n");
 
   // Register mcasm as its own architecture (not x86)
   RegisterTarget<Triple::mcasm, /*HasJIT=*/true> X(
       getTheMcasm_32Target(), "mcasm", "32-bit Mcasm (Minecraft assembly)", "Mcasm");
 
-  fprintf(stderr, "DEBUG: RegisterTarget completed\n");
-  fflush(stderr);
+  MCASM_DEBUG_LOG("DEBUG: RegisterTarget completed\n");
 }
+

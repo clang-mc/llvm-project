@@ -1,4 +1,4 @@
-//===-- McasmTargetMachine.cpp - Minimal Mcasm TargetMachine with stubs ---===//
+﻿//===-- McasmTargetMachine.cpp - Minimal Mcasm TargetMachine with stubs ---===//
 //
 // MCASM NOTE: This is a minimal stub implementation with necessary stubs
 // to satisfy linker requirements without compiling problematic X86 files.
@@ -6,6 +6,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "McasmTargetMachine.h"
+#include "TargetInfo/McasmDebug.h"
 #include "MCTargetDesc/McasmMCTargetDesc.h"
 #include "MCTargetDesc/McasmFilteredStream.h"
 #include "TargetInfo/McasmTargetInfo.h"
@@ -65,14 +66,13 @@ public:
 
 // MCASM NOTE: Minimal target initialization - only 32-bit target
 extern "C" LLVM_C_ABI void LLVMInitializeMcasmTarget() {
-  llvm::errs() << "DEBUG: LLVMInitializeMcasmTarget called\n";
+  MCASM_DEBUG_LOG("DEBUG: LLVMInitializeMcasmTarget called\n");
   RegisterTargetMachine<McasmTargetMachine> X(getTheMcasm_32Target());
-  llvm::errs() << "DEBUG: RegisterTargetMachine completed\n";
+  MCASM_DEBUG_LOG("DEBUG: RegisterTargetMachine completed\n");
 }
 
 static void debugLog(const char *msg) {
-  llvm::errs() << "DEBUG: " << msg << "\n";
-  llvm::errs().flush();
+  MCASM_DEBUG_LOG("DEBUG: %s\n", msg);
 }
 
 static std::unique_ptr<TargetLoweringObjectFile> createTLOF(const Triple &TT) {
@@ -107,9 +107,8 @@ McasmTargetMachine::~McasmTargetMachine() = default;
 
 // Get or create subtarget for the given function
 const McasmSubtarget *McasmTargetMachine::getSubtargetImpl(const Function &F) const {
-  fprintf(stderr, "DEBUG: McasmTargetMachine::getSubtargetImpl called for function '%s'\n",
+  MCASM_DEBUG_LOG("DEBUG: McasmTargetMachine::getSubtargetImpl called for function '%s'\n",
           F.getName().str().c_str());
-  fflush(stderr);
 
   Attribute CPUAttr = F.getFnAttribute("target-cpu");
   Attribute TuneAttr = F.getFnAttribute("tune-cpu");
@@ -121,9 +120,8 @@ const McasmSubtarget *McasmTargetMachine::getSubtargetImpl(const Function &F) co
   StringRef FS =
       FSAttr.isValid() ? FSAttr.getValueAsString() : (StringRef)getTargetFeatureString();
 
-  fprintf(stderr, "DEBUG:   CPU = '%s', TuneCPU = '%s', FS = '%s'\n",
+  MCASM_DEBUG_LOG("DEBUG:   CPU = '%s', TuneCPU = '%s', FS = '%s'\n",
           CPU.str().c_str(), TuneCPU.str().c_str(), FS.str().c_str());
-  fflush(stderr);
 
   SmallString<512> Key;
   Key.reserve(CPU.size() + TuneCPU.size() + FS.size());
@@ -133,15 +131,12 @@ const McasmSubtarget *McasmTargetMachine::getSubtargetImpl(const Function &F) co
 
   auto &I = SubtargetMap[Key];
   if (!I) {
-    fprintf(stderr, "DEBUG:   Creating new McasmSubtarget\n");
-    fflush(stderr);
+    MCASM_DEBUG_LOG("DEBUG:   Creating new McasmSubtarget\n");
     I = std::make_unique<McasmSubtarget>(TargetTriple, CPU, TuneCPU, FS, *this,
                                          MaybeAlign(), 0, 0);
-    fprintf(stderr, "DEBUG:   McasmSubtarget created at %p\n", (void*)I.get());
-    fflush(stderr);
+    MCASM_DEBUG_LOG("DEBUG:   McasmSubtarget created at %p\n", (void*)I.get());
   } else {
-    fprintf(stderr, "DEBUG:   Using cached McasmSubtarget at %p\n", (void*)I.get());
-    fflush(stderr);
+    MCASM_DEBUG_LOG("DEBUG:   Using cached McasmSubtarget at %p\n", (void*)I.get());
   }
   return I.get();
 }
@@ -193,8 +188,7 @@ class McasmPassConfig : public TargetPassConfig {
 public:
   McasmPassConfig(McasmTargetMachine &TM, PassManagerBase &PM)
     : TargetPassConfig(TM, PM) {
-    fprintf(stderr, "DEBUG: McasmPassConfig constructor\n");
-    fflush(stderr);
+    MCASM_DEBUG_LOG("DEBUG: McasmPassConfig constructor\n");
   }
 
   McasmTargetMachine &getMcasmTargetMachine() const {
@@ -202,18 +196,15 @@ public:
   }
 
   bool addInstSelector() override {
-    fprintf(stderr, "DEBUG: McasmPassConfig::addInstSelector called\n");
-    fflush(stderr);
+    MCASM_DEBUG_LOG("DEBUG: McasmPassConfig::addInstSelector called\n");
     // Add the instruction selector pass
     addPass(createMcasmISelDag(getMcasmTargetMachine(), getOptLevel()));
-    fprintf(stderr, "DEBUG: McasmPassConfig::addInstSelector completed\n");
-    fflush(stderr);
+    MCASM_DEBUG_LOG("DEBUG: McasmPassConfig::addInstSelector completed\n");
     return false;  // false means we handled it
   }
 
   void addIRPasses() override {
-    fprintf(stderr, "DEBUG: McasmPassConfig::addIRPasses called\n");
-    fflush(stderr);
+    MCASM_DEBUG_LOG("DEBUG: McasmPassConfig::addIRPasses called\n");
 
     // Call base class to add standard IR passes
     TargetPassConfig::addIRPasses();
@@ -221,105 +212,84 @@ public:
     // Lower bit-ops to __bit_* libcalls and link runtime IR.
     addPass(createMcasmLowerBitOpsPass());
 
-    fprintf(stderr, "DEBUG: McasmPassConfig::addIRPasses completed\n");
-    fflush(stderr);
+    MCASM_DEBUG_LOG("DEBUG: McasmPassConfig::addIRPasses completed\n");
   }
 
   void addISelPrepare() override {
-    fprintf(stderr, "DEBUG: McasmPassConfig::addISelPrepare called\n");
-    fflush(stderr);
+    MCASM_DEBUG_LOG("DEBUG: McasmPassConfig::addISelPrepare called\n");
 
     // Keep default ISel preparation first.
     TargetPassConfig::addISelPrepare();
 
-    fprintf(stderr, "DEBUG: McasmPassConfig::addISelPrepare completed\n");
-    fflush(stderr);
+    MCASM_DEBUG_LOG("DEBUG: McasmPassConfig::addISelPrepare completed\n");
     return;
   }
 
   bool addIRTranslator() override {
-    fprintf(stderr, "DEBUG: McasmPassConfig::addIRTranslator called\n");
-    fflush(stderr);
+    MCASM_DEBUG_LOG("DEBUG: McasmPassConfig::addIRTranslator called\n");
     return TargetPassConfig::addIRTranslator();
   }
 
   void addCodeGenPrepare() override {
-    fprintf(stderr, "DEBUG: McasmPassConfig::addCodeGenPrepare called\n");
-    fflush(stderr);
+    MCASM_DEBUG_LOG("DEBUG: McasmPassConfig::addCodeGenPrepare called\n");
 
     // Call base class to add CodeGenPrepare pass
     TargetPassConfig::addCodeGenPrepare();
 
-    fprintf(stderr, "DEBUG: McasmPassConfig::addCodeGenPrepare completed\n");
-    fflush(stderr);
+    MCASM_DEBUG_LOG("DEBUG: McasmPassConfig::addCodeGenPrepare completed\n");
   }
 
   bool addLegalizeMachineIR() override {
-    fprintf(stderr, "DEBUG: McasmPassConfig::addLegalizeMachineIR called\n");
-    fflush(stderr);
+    MCASM_DEBUG_LOG("DEBUG: McasmPassConfig::addLegalizeMachineIR called\n");
     return TargetPassConfig::addLegalizeMachineIR();
   }
 
   bool addRegBankSelect() override {
-    fprintf(stderr, "DEBUG: McasmPassConfig::addRegBankSelect called\n");
-    fflush(stderr);
+    MCASM_DEBUG_LOG("DEBUG: McasmPassConfig::addRegBankSelect called\n");
     return TargetPassConfig::addRegBankSelect();
   }
 
   bool addGlobalInstructionSelect() override {
-    fprintf(stderr, "DEBUG: McasmPassConfig::addGlobalInstructionSelect called\n");
-    fflush(stderr);
+    MCASM_DEBUG_LOG("DEBUG: McasmPassConfig::addGlobalInstructionSelect called\n");
     return TargetPassConfig::addGlobalInstructionSelect();
   }
 
   void addMachineSSAOptimization() override {
-    fprintf(stderr, "DEBUG: McasmPassConfig::addMachineSSAOptimization called\n");
-    fflush(stderr);
+    MCASM_DEBUG_LOG("DEBUG: McasmPassConfig::addMachineSSAOptimization called\n");
     TargetPassConfig::addMachineSSAOptimization();
-    fprintf(stderr, "DEBUG: McasmPassConfig::addMachineSSAOptimization completed\n");
-    fflush(stderr);
+    MCASM_DEBUG_LOG("DEBUG: McasmPassConfig::addMachineSSAOptimization completed\n");
   }
 
   void addPreRegAlloc() override {
-    fprintf(stderr, "DEBUG: McasmPassConfig::addPreRegAlloc called\n");
-    fflush(stderr);
+    MCASM_DEBUG_LOG("DEBUG: McasmPassConfig::addPreRegAlloc called\n");
     TargetPassConfig::addPreRegAlloc();
-    fprintf(stderr, "DEBUG: McasmPassConfig::addPreRegAlloc completed\n");
-    fflush(stderr);
+    MCASM_DEBUG_LOG("DEBUG: McasmPassConfig::addPreRegAlloc completed\n");
   }
 
   void addPostRegAlloc() override {
-    fprintf(stderr, "DEBUG: McasmPassConfig::addPostRegAlloc called\n");
-    fflush(stderr);
+    MCASM_DEBUG_LOG("DEBUG: McasmPassConfig::addPostRegAlloc called\n");
     TargetPassConfig::addPostRegAlloc();
-    fprintf(stderr, "DEBUG: McasmPassConfig::addPostRegAlloc completed\n");
-    fflush(stderr);
+    MCASM_DEBUG_LOG("DEBUG: McasmPassConfig::addPostRegAlloc completed\n");
   }
 
   void addPreSched2() override {
-    fprintf(stderr, "DEBUG: McasmPassConfig::addPreSched2 called\n");
-    fflush(stderr);
+    MCASM_DEBUG_LOG("DEBUG: McasmPassConfig::addPreSched2 called\n");
     TargetPassConfig::addPreSched2();
-    fprintf(stderr, "DEBUG: McasmPassConfig::addPreSched2 completed\n");
-    fflush(stderr);
+    MCASM_DEBUG_LOG("DEBUG: McasmPassConfig::addPreSched2 completed\n");
   }
 
   void addPreEmitPass() override {
-    fprintf(stderr, "DEBUG: McasmPassConfig::addPreEmitPass called\n");
-    fflush(stderr);
+    MCASM_DEBUG_LOG("DEBUG: McasmPassConfig::addPreEmitPass called\n");
     TargetPassConfig::addPreEmitPass();
-    fprintf(stderr, "DEBUG: McasmPassConfig::addPreEmitPass completed\n");
-    fflush(stderr);
+    MCASM_DEBUG_LOG("DEBUG: McasmPassConfig::addPreEmitPass completed\n");
   }
 };
 }
 
 TargetPassConfig *McasmTargetMachine::createPassConfig(PassManagerBase &PM) {
-  fprintf(stderr, "DEBUG: McasmTargetMachine::createPassConfig called\n");
-  fflush(stderr);
+  MCASM_DEBUG_LOG("DEBUG: McasmTargetMachine::createPassConfig called\n");
   auto *PC = new McasmPassConfig(*this, PM);
-  fprintf(stderr, "DEBUG: McasmTargetMachine::createPassConfig completed, PC=%p\n", (void*)PC);
-  fflush(stderr);
+  MCASM_DEBUG_LOG("DEBUG: McasmTargetMachine::createPassConfig completed, PC=%p\n", (void*)PC);
   return PC;
 }
 
@@ -327,18 +297,14 @@ bool McasmTargetMachine::addPassesToEmitFile(
     PassManagerBase &PM, raw_pwrite_stream &Out, raw_pwrite_stream *DwoOut,
     CodeGenFileType FileType, bool DisableVerify,
     MachineModuleInfoWrapperPass *MMIWP) {
-  fprintf(stderr, "DEBUG: McasmTargetMachine::addPassesToEmitFile called\n");
-  fflush(stderr);
-  fprintf(stderr, "DEBUG:   FileType=%d, DisableVerify=%d, MMIWP=%p\n",
+  MCASM_DEBUG_LOG("DEBUG: McasmTargetMachine::addPassesToEmitFile called\n");
+  MCASM_DEBUG_LOG("DEBUG:   FileType=%d, DisableVerify=%d, MMIWP=%p\n",
           (int)FileType, (int)DisableVerify, (void*)MMIWP);
-  fflush(stderr);
 
-  fprintf(stderr, "DEBUG: About to call base class addPassesToEmitFile\n");
-  fflush(stderr);
+  MCASM_DEBUG_LOG("DEBUG: About to call base class addPassesToEmitFile\n");
   bool Result = CodeGenTargetMachineImpl::addPassesToEmitFile(
       PM, Out, DwoOut, FileType, DisableVerify, MMIWP);
-  fprintf(stderr, "DEBUG: Base class addPassesToEmitFile returned %d\n", (int)Result);
-  fflush(stderr);
+  MCASM_DEBUG_LOG("DEBUG: Base class addPassesToEmitFile returned %d\n", (int)Result);
 
   return Result;
 }
@@ -348,17 +314,13 @@ bool McasmTargetMachine::addAsmPrinter(PassManagerBase &PM,
                                        raw_pwrite_stream *DwoOut,
                                        CodeGenFileType FileType,
                                        MCContext &Context) {
-  fprintf(stderr, "DEBUG: McasmTargetMachine::addAsmPrinter called\n");
-  fflush(stderr);
-  fprintf(stderr, "DEBUG:   FileType=%d, DwoOut=%p, Context=%p\n",
+  MCASM_DEBUG_LOG("DEBUG: McasmTargetMachine::addAsmPrinter called\n");
+  MCASM_DEBUG_LOG("DEBUG:   FileType=%d, DwoOut=%p, Context=%p\n",
           (int)FileType, (void*)DwoOut, (void*)&Context);
-  fflush(stderr);
 
-  fprintf(stderr, "DEBUG: About to call base class addAsmPrinter\n");
-  fflush(stderr);
+  MCASM_DEBUG_LOG("DEBUG: About to call base class addAsmPrinter\n");
   bool Result = CodeGenTargetMachineImpl::addAsmPrinter(PM, Out, DwoOut, FileType, Context);
-  fprintf(stderr, "DEBUG: Base class addAsmPrinter returned %d\n", (int)Result);
-  fflush(stderr);
+  MCASM_DEBUG_LOG("DEBUG: Base class addAsmPrinter returned %d\n", (int)Result);
 
   return Result;
 }
@@ -368,112 +330,83 @@ McasmTargetMachine::createMCStreamer(raw_pwrite_stream &Out,
                                      raw_pwrite_stream *DwoOut,
                                      CodeGenFileType FileType,
                                      MCContext &Context) {
-  fprintf(stderr, "DEBUG: McasmTargetMachine::createMCStreamer called\n");
-  fflush(stderr);
-  fprintf(stderr, "DEBUG:   FileType=%d (0=AssemblyFile, 1=ObjectFile)\n", (int)FileType);
-  fflush(stderr);
+  MCASM_DEBUG_LOG("DEBUG: McasmTargetMachine::createMCStreamer called\n");
+  MCASM_DEBUG_LOG("DEBUG:   FileType=%d (0=AssemblyFile, 1=ObjectFile)\n", (int)FileType);
 
-  // 获取 MC 组件
-  fprintf(stderr, "DEBUG: Step 1 - getting MC components\n");
-  fflush(stderr);
+  // 鑾峰彇 MC 缁勪欢
+  MCASM_DEBUG_LOG("DEBUG: Step 1 - getting MC components\n");
   const MCSubtargetInfo &STI = *getMCSubtargetInfo();
-  fprintf(stderr, "DEBUG:   STI obtained\n");
-  fflush(stderr);
+  MCASM_DEBUG_LOG("DEBUG:   STI obtained\n");
   const MCAsmInfo &MAI = *getMCAsmInfo();
-  fprintf(stderr, "DEBUG:   MAI obtained\n");
-  fflush(stderr);
+  MCASM_DEBUG_LOG("DEBUG:   MAI obtained\n");
   const MCRegisterInfo &MRI = *getMCRegisterInfo();
-  fprintf(stderr, "DEBUG:   MRI obtained\n");
-  fflush(stderr);
+  MCASM_DEBUG_LOG("DEBUG:   MRI obtained\n");
   const MCInstrInfo &MII = *getMCInstrInfo();
-  fprintf(stderr, "DEBUG:   MII obtained\n");
-  fflush(stderr);
+  MCASM_DEBUG_LOG("DEBUG:   MII obtained\n");
 
   std::unique_ptr<MCStreamer> AsmStreamer;
 
   switch (FileType) {
   case CodeGenFileType::AssemblyFile: {
-    fprintf(stderr, "DEBUG: Step 2 - creating MCInstPrinter\n");
-    fflush(stderr);
-    fprintf(stderr, "DEBUG:   Triple = %s\n", getTargetTriple().str().c_str());
-    fflush(stderr);
-    fprintf(stderr, "DEBUG:   Target name = %s\n", getTarget().getName());
-    fflush(stderr);
-    fprintf(stderr, "DEBUG:   Assembler dialect = %u\n", MAI.getAssemblerDialect());
-    fflush(stderr);
+    MCASM_DEBUG_LOG("DEBUG: Step 2 - creating MCInstPrinter\n");
+    MCASM_DEBUG_LOG("DEBUG:   Triple = %s\n", getTargetTriple().str().c_str());
+    MCASM_DEBUG_LOG("DEBUG:   Target name = %s\n", getTarget().getName());
+    MCASM_DEBUG_LOG("DEBUG:   Assembler dialect = %u\n", MAI.getAssemblerDialect());
 
-    fprintf(stderr, "DEBUG:   About to call getTarget().createMCInstPrinter()\n");
-    fflush(stderr);
+    MCASM_DEBUG_LOG("DEBUG:   About to call getTarget().createMCInstPrinter()\n");
     std::unique_ptr<MCInstPrinter> InstPrinter(getTarget().createMCInstPrinter(
         getTargetTriple(),
         Options.MCOptions.OutputAsmVariant.value_or(MAI.getAssemblerDialect()),
         MAI, MII, MRI));
-    fprintf(stderr, "DEBUG:   createMCInstPrinter returned, InstPrinter=%p\n", (void*)InstPrinter.get());
-    fflush(stderr);
+    MCASM_DEBUG_LOG("DEBUG:   createMCInstPrinter returned, InstPrinter=%p\n", (void*)InstPrinter.get());
 
     if (!InstPrinter) {
       fprintf(stderr, "ERROR: createMCInstPrinter returned nullptr\n");
-      fflush(stderr);
       return createStringError("Failed to create MCInstPrinter for mcasm");
     }
 
-    fprintf(stderr, "DEBUG: Step 3 - applying InstPrinter options\n");
-    fflush(stderr);
+    MCASM_DEBUG_LOG("DEBUG: Step 3 - applying InstPrinter options\n");
     for (StringRef Opt : Options.MCOptions.InstPrinterOptions) {
-      fprintf(stderr, "DEBUG:   Applying option: %s\n", Opt.str().c_str());
-      fflush(stderr);
+      MCASM_DEBUG_LOG("DEBUG:   Applying option: %s\n", Opt.str().c_str());
       if (!InstPrinter->applyTargetSpecificCLOption(Opt))
         return createStringError("invalid InstPrinter option '" + Opt + "'");
     }
-    fprintf(stderr, "DEBUG:   All InstPrinter options applied\n");
-    fflush(stderr);
+    MCASM_DEBUG_LOG("DEBUG:   All InstPrinter options applied\n");
 
-    // 创建 code emitter (如果需要显示编码)
+    // 鍒涘缓 code emitter (濡傛灉闇€瑕佹樉绀虹紪鐮?
     std::unique_ptr<MCCodeEmitter> MCE;
     if (Options.MCOptions.ShowMCEncoding) {
-      fprintf(stderr, "DEBUG: Step 4 - creating MCCodeEmitter\n");
-      fflush(stderr);
+      MCASM_DEBUG_LOG("DEBUG: Step 4 - creating MCCodeEmitter\n");
       MCE.reset(getTarget().createMCCodeEmitter(MII, Context));
-      fprintf(stderr, "DEBUG:   createMCCodeEmitter returned, MCE=%p\n", (void*)MCE.get());
-      fflush(stderr);
+      MCASM_DEBUG_LOG("DEBUG:   createMCCodeEmitter returned, MCE=%p\n", (void*)MCE.get());
     } else {
-      fprintf(stderr, "DEBUG: Step 4 - skipping MCCodeEmitter (ShowMCEncoding=false)\n");
-      fflush(stderr);
+      MCASM_DEBUG_LOG("DEBUG: Step 4 - skipping MCCodeEmitter (ShowMCEncoding=false)\n");
     }
 
-    fprintf(stderr, "DEBUG: Step 5 - creating MCAsmBackend\n");
-    fflush(stderr);
+    MCASM_DEBUG_LOG("DEBUG: Step 5 - creating MCAsmBackend\n");
     std::unique_ptr<MCAsmBackend> MAB(
         getTarget().createMCAsmBackend(STI, MRI, Options.MCOptions));
-    fprintf(stderr, "DEBUG:   createMCAsmBackend returned, MAB=%p\n", (void*)MAB.get());
-    fflush(stderr);
+    MCASM_DEBUG_LOG("DEBUG:   createMCAsmBackend returned, MAB=%p\n", (void*)MAB.get());
 
     if (!MAB) {
       fprintf(stderr, "ERROR: createMCAsmBackend returned nullptr\n");
-      fflush(stderr);
       return createStringError("Failed to create MCAsmBackend for mcasm");
     }
 
-    fprintf(stderr, "DEBUG: Step 6 - creating McasmFilteredStream\n");
-    fflush(stderr);
+    MCASM_DEBUG_LOG("DEBUG: Step 6 - creating McasmFilteredStream\n");
     // Create filtered stream to remove ELF directives
     auto FilteredOut = std::make_unique<McasmFilteredStream>(Out);
-    fprintf(stderr, "DEBUG:   McasmFilteredStream created\n");
-    fflush(stderr);
+    MCASM_DEBUG_LOG("DEBUG:   McasmFilteredStream created\n");
 
-    fprintf(stderr, "DEBUG: Step 7 - creating formatted_raw_ostream\n");
-    fflush(stderr);
+    MCASM_DEBUG_LOG("DEBUG: Step 7 - creating formatted_raw_ostream\n");
     auto FOut = std::make_unique<formatted_raw_ostream>(*FilteredOut);
-    fprintf(stderr, "DEBUG:   formatted_raw_ostream created\n");
-    fflush(stderr);
+    MCASM_DEBUG_LOG("DEBUG:   formatted_raw_ostream created\n");
 
-    fprintf(stderr, "DEBUG: Step 8 - calling getTarget().createAsmStreamer()\n");
-    fflush(stderr);
+    MCASM_DEBUG_LOG("DEBUG: Step 8 - calling getTarget().createAsmStreamer()\n");
     MCStreamer *S = getTarget().createAsmStreamer(
         Context, std::move(FOut), std::move(InstPrinter), std::move(MCE),
         std::move(MAB));
-    fprintf(stderr, "DEBUG:   createAsmStreamer returned, S=%p\n", (void*)S);
-    fflush(stderr);
+    MCASM_DEBUG_LOG("DEBUG:   createAsmStreamer returned, S=%p\n", (void*)S);
 
     // Keep FilteredOut alive by storing it in AsmStreamer's context
     // (it will be destroyed when AsmStreamer is destroyed)
@@ -483,28 +416,23 @@ McasmTargetMachine::createMCStreamer(raw_pwrite_stream &Out,
 
     if (!S) {
       fprintf(stderr, "ERROR: createAsmStreamer returned nullptr\n");
-      fflush(stderr);
       return createStringError("Failed to create AsmStreamer for mcasm");
     }
 
     AsmStreamer.reset(S);
-    fprintf(stderr, "DEBUG: Step 9 - AsmStreamer reset completed\n");
-    fflush(stderr);
+    MCASM_DEBUG_LOG("DEBUG: Step 9 - AsmStreamer reset completed\n");
     break;
   }
   case CodeGenFileType::ObjectFile: {
     fprintf(stderr, "ERROR: ObjectFile generation not supported for mcasm\n");
-    fflush(stderr);
     return createStringError("mcasm does not support object file generation");
   }
   default:
     fprintf(stderr, "ERROR: Unknown FileType=%d\n", (int)FileType);
-    fflush(stderr);
     return createStringError("Unknown CodeGenFileType");
   }
 
-  fprintf(stderr, "DEBUG: createMCStreamer completed successfully\n");
-  fflush(stderr);
+  MCASM_DEBUG_LOG("DEBUG: createMCStreamer completed successfully\n");
   return std::move(AsmStreamer);
 }
 
@@ -523,3 +451,4 @@ Error McasmTargetMachine::buildCodeGenPipeline(
     PassInstrumentationCallbacks *) {
   return Error::success();
 }
+

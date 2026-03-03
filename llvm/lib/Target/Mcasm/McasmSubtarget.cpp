@@ -1,4 +1,4 @@
-//===-- McasmSubtarget.cpp - Mcasm Subtarget Information ------------------===//
+﻿//===-- McasmSubtarget.cpp - Mcasm Subtarget Information ------------------===//
 //
 // MCASM NOTE: Minimal implementation for mcasm backend.
 // Most X86-specific features have been removed.
@@ -6,6 +6,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "McasmSubtarget.h"
+#include "TargetInfo/McasmDebug.h"
 #include "Mcasm.h"
 #include "McasmTargetMachine.h"
 #include "MCTargetDesc/McasmBaseInfo.h"
@@ -81,31 +82,27 @@ bool McasmSubtarget::isLegalToCallImmediateAddr() const {
 
 void McasmSubtarget::initSubtargetFeatures(StringRef CPU, StringRef TuneCPU,
                                           StringRef FS) {
-  fprintf(stderr, "DEBUG: McasmSubtarget::initSubtargetFeatures called\n");
-  fprintf(stderr, "DEBUG:   CPU = %s, TuneCPU = %s, FS = %s\n",
+  MCASM_DEBUG_LOG("DEBUG: McasmSubtarget::initSubtargetFeatures called\n");
+  MCASM_DEBUG_LOG("DEBUG:   CPU = %s, TuneCPU = %s, FS = %s\n",
           CPU.str().c_str(), TuneCPU.str().c_str(), FS.str().c_str());
-  fflush(stderr);
 
   // MCASM NOTE: Simplified feature initialization
   std::string CPUName = std::string(CPU);
   if (CPUName.empty())
     CPUName = "generic";
 
-  fprintf(stderr, "DEBUG:   CPUName = %s\n", CPUName.c_str());
-  fflush(stderr);
+  MCASM_DEBUG_LOG("DEBUG:   CPUName = %s\n", CPUName.c_str());
 
   std::string TuneCPUName = std::string(TuneCPU);
   if (TuneCPUName.empty())
     TuneCPUName = CPUName;
 
-  fprintf(stderr, "DEBUG:   TuneCPUName = %s\n", TuneCPUName.c_str());
-  fprintf(stderr, "DEBUG:   About to call ParseSubtargetFeatures...\n");
-  fflush(stderr);
+  MCASM_DEBUG_LOG("DEBUG:   TuneCPUName = %s\n", TuneCPUName.c_str());
+  MCASM_DEBUG_LOG("DEBUG:   About to call ParseSubtargetFeatures...\n");
 
   ParseSubtargetFeatures(CPUName, TuneCPUName, FS);
 
-  fprintf(stderr, "DEBUG:   ParseSubtargetFeatures completed\n");
-  fflush(stderr);
+  MCASM_DEBUG_LOG("DEBUG:   ParseSubtargetFeatures completed\n");
 }
 
 McasmSubtarget &McasmSubtarget::initializeSubtargetDependencies(StringRef CPU,
@@ -125,12 +122,11 @@ McasmSubtarget::McasmSubtarget(const Triple &TT, StringRef CPU, StringRef TuneCP
       InstrInfo(initializeSubtargetDependencies(CPU, TuneCPU, FS)),
       TLInfo(TM, *this), FrameLowering(*this) {
 
-  fprintf(stderr, "DEBUG: McasmSubtarget constructor called\n");
-  fprintf(stderr, "DEBUG:   TT = %s\n", TT.str().c_str());
-  fprintf(stderr, "DEBUG:   CPU = %s\n", CPU.str().c_str());
-  fprintf(stderr, "DEBUG:   TuneCPU = %s\n", TuneCPU.str().c_str());
-  fprintf(stderr, "DEBUG:   FS = %s\n", FS.str().c_str());
-  fflush(stderr);
+  MCASM_DEBUG_LOG("DEBUG: McasmSubtarget constructor called\n");
+  MCASM_DEBUG_LOG("DEBUG:   TT = %s\n", TT.str().c_str());
+  MCASM_DEBUG_LOG("DEBUG:   CPU = %s\n", CPU.str().c_str());
+  MCASM_DEBUG_LOG("DEBUG:   TuneCPU = %s\n", TuneCPU.str().c_str());
+  MCASM_DEBUG_LOG("DEBUG:   FS = %s\n", FS.str().c_str());
 
   // CRITICAL FIX: TableGen generates incorrect default values for mode flags
   // Force correct values for mcasm (32-bit only)
@@ -138,9 +134,8 @@ McasmSubtarget::McasmSubtarget(const Triple &TT, StringRef CPU, StringRef TuneCP
   In32BitMode = true;   // mcasm is always 32-bit
   In16BitMode = false;  // mcasm is not 16-bit
 
-  fprintf(stderr, "DEBUG:   In64BitMode = %d, In32BitMode = %d, In16BitMode = %d\n",
+  MCASM_DEBUG_LOG("DEBUG:   In64BitMode = %d, In32BitMode = %d, In16BitMode = %d\n",
           In64BitMode, In32BitMode, In16BitMode);
-  fflush(stderr);
 
   // Determine the PICStyle based on the target selected
   if (!isPositionIndependent())
@@ -154,11 +149,10 @@ McasmSubtarget::McasmSubtarget(const Triple &TT, StringRef CPU, StringRef TuneCP
   else if (isTargetELF())
     setPICStyle(PICStyles::Style::GOT);
 
-  fprintf(stderr, "DEBUG: McasmSubtarget constructor completed successfully\n");
-  fprintf(stderr, "DEBUG:   TLInfo = %p\n", (void*)&TLInfo);
-  fprintf(stderr, "DEBUG:   InstrInfo = %p\n", (void*)&InstrInfo);
-  fprintf(stderr, "DEBUG:   FrameLowering = %p\n", (void*)&FrameLowering);
-  fflush(stderr);
+  MCASM_DEBUG_LOG("DEBUG: McasmSubtarget constructor completed successfully\n");
+  MCASM_DEBUG_LOG("DEBUG:   TLInfo = %p\n", (void*)&TLInfo);
+  MCASM_DEBUG_LOG("DEBUG:   InstrInfo = %p\n", (void*)&InstrInfo);
+  MCASM_DEBUG_LOG("DEBUG:   FrameLowering = %p\n", (void*)&FrameLowering);
 }
 
 McasmSubtarget::~McasmSubtarget() = default;
@@ -276,3 +270,4 @@ void McasmSubtarget::initLibcallLoweringInfo(LibcallLoweringInfo &Info) const {
   Info.setLibcallImpl(RTLIB::SRL_I64, RTLIB::impl___lshrdi3);
   Info.setLibcallImpl(RTLIB::SRA_I64, RTLIB::impl___ashrdi3);
 }
+

@@ -1,4 +1,4 @@
-//===-- McasmAsmPrinter.cpp - Convert Mcasm LLVM code to mcasm assembly --===//
+﻿//===-- McasmAsmPrinter.cpp - Convert Mcasm LLVM code to mcasm assembly --===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -22,6 +22,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "McasmAsmPrinter.h"
+#include "TargetInfo/McasmDebug.h"
 #include "MCTargetDesc/McasmMCTargetDesc.h"
 #include "MCTargetDesc/McasmInstPrinter.h"
 #include "MCTargetDesc/McasmBaseInfo.h"
@@ -241,13 +242,11 @@ static std::string rewriteMcasmInlineHelperBody(StringRef Body) {
 McasmAsmPrinter::McasmAsmPrinter(TargetMachine &TM,
                                  std::unique_ptr<MCStreamer> Streamer)
     : AsmPrinter(TM, std::move(Streamer)), Subtarget(nullptr) {
-  fprintf(stderr, "DEBUG: McasmAsmPrinter constructor completed\n");
-  fflush(stderr);
+  MCASM_DEBUG_LOG("DEBUG: McasmAsmPrinter constructor completed\n");
 }
 
 void McasmAsmPrinter::emitStartOfAsmFile(Module &M) {
-  fprintf(stderr, "DEBUG: McasmAsmPrinter::emitStartOfAsmFile called\n");
-  fflush(stderr);
+  MCASM_DEBUG_LOG("DEBUG: McasmAsmPrinter::emitStartOfAsmFile called\n");
   // mcasm requires #include "_ll_std" at the start of every file
   OutStreamer->emitRawText("#include \"_ll_std\"");
   OutStreamer->emitRawText("");  // Blank line
@@ -259,8 +258,7 @@ void McasmAsmPrinter::emitStartOfAsmFile(Module &M) {
       std::string ExternDecl = "extern _ll_shared:";
       ExternDecl += F.getName();
       ExternDecl += ":";
-      fprintf(stderr, "DEBUG:   Emitting extern declaration: %s\n", ExternDecl.c_str());
-      fflush(stderr);
+      MCASM_DEBUG_LOG("DEBUG:   Emitting extern declaration: %s\n", ExternDecl.c_str());
       OutStreamer->emitRawText(ExternDecl);
     }
   }
@@ -271,8 +269,7 @@ void McasmAsmPrinter::emitStartOfAsmFile(Module &M) {
     OutStreamer->emitRawText("");  // Blank line after extern declarations
   }
 
-  fprintf(stderr, "DEBUG: McasmAsmPrinter::emitStartOfAsmFile completed\n");
-  fflush(stderr);
+  MCASM_DEBUG_LOG("DEBUG: McasmAsmPrinter::emitStartOfAsmFile completed\n");
 }
 
 void McasmAsmPrinter::emitEndOfAsmFile(Module &M) {
@@ -472,20 +469,17 @@ void McasmAsmPrinter::emitFunctionBodyEnd() {
 }
 
 void McasmAsmPrinter::emitFunctionEntryLabel() {
-  fprintf(stderr, "DEBUG: McasmAsmPrinter::emitFunctionEntryLabel called\n");
-  fflush(stderr);
+  MCASM_DEBUG_LOG("DEBUG: McasmAsmPrinter::emitFunctionEntryLabel called\n");
 
   MCSymbol *FnSym = CurrentFnSym;
-  fprintf(stderr, "DEBUG:   FunctionName = %s\n", FnSym->getName().str().c_str());
-  fflush(stderr);
+  MCASM_DEBUG_LOG("DEBUG:   FunctionName = %s\n", FnSym->getName().str().c_str());
 
   // Determine DLL storage class
   const Function &F = MF->getFunction();
   bool IsDLLExport = F.hasDLLExportStorageClass();
   bool IsDLLImport = F.hasDLLImportStorageClass();
-  fprintf(stderr, "DEBUG:   IsDLLExport = %d, IsDLLImport = %d\n",
+  MCASM_DEBUG_LOG("DEBUG:   IsDLLExport = %d, IsDLLImport = %d\n",
           (int)IsDLLExport, (int)IsDLLImport);
-  fflush(stderr);
 
   if (IsDLLExport) {
     // __declspec(dllexport): export _ll_shared:funcname:
@@ -493,8 +487,7 @@ void McasmAsmPrinter::emitFunctionEntryLabel() {
     std::string Label = "export ";
     Label += FnSym->getName();
     Label += ":";
-    fprintf(stderr, "DEBUG:   Emitting export label: %s\n", Label.c_str());
-    fflush(stderr);
+    MCASM_DEBUG_LOG("DEBUG:   Emitting export label: %s\n", Label.c_str());
     OutStreamer->emitRawText(Label);
   } else if (IsDLLImport) {
     // __declspec(dllimport): extern _ll_shared:funcname:
@@ -502,28 +495,23 @@ void McasmAsmPrinter::emitFunctionEntryLabel() {
     std::string Label = "extern ";
     Label += FnSym->getName();
     Label += ":";
-    fprintf(stderr, "DEBUG:   Emitting extern label: %s\n", Label.c_str());
-    fflush(stderr);
+    MCASM_DEBUG_LOG("DEBUG:   Emitting extern label: %s\n", Label.c_str());
     OutStreamer->emitRawText(Label);
   } else {
     // Regular function: funcname:
-    fprintf(stderr, "DEBUG:   Emitting regular label\n");
-    fflush(stderr);
+    MCASM_DEBUG_LOG("DEBUG:   Emitting regular label\n");
     OutStreamer->emitLabel(FnSym);
   }
 
-  fprintf(stderr, "DEBUG: McasmAsmPrinter::emitFunctionEntryLabel completed\n");
-  fflush(stderr);
+  MCASM_DEBUG_LOG("DEBUG: McasmAsmPrinter::emitFunctionEntryLabel completed\n");
 }
 
 void McasmAsmPrinter::emitInstruction(const MachineInstr *MI) {
-  fprintf(stderr, "DEBUG: McasmAsmPrinter::emitInstruction called, Opcode=%u\n", MI->getOpcode());
-  fflush(stderr);
+  MCASM_DEBUG_LOG("DEBUG: McasmAsmPrinter::emitInstruction called, Opcode=%u\n", MI->getOpcode());
 
   // Skip pseudo instructions
   if (MI->isPseudo()) {
-    fprintf(stderr, "DEBUG:   Skipping pseudo instruction\n");
-    fflush(stderr);
+    MCASM_DEBUG_LOG("DEBUG:   Skipping pseudo instruction\n");
     return;
   }
 
@@ -534,8 +522,7 @@ void McasmAsmPrinter::emitInstruction(const MachineInstr *MI) {
   }
   MCInstLowering->Lower(MI, TmpInst);
 
-  fprintf(stderr, "DEBUG:   About to emit MCInst\n");
-  fflush(stderr);
+  MCASM_DEBUG_LOG("DEBUG:   About to emit MCInst\n");
 
   // Emit the MCInst
   // NOTE: Memory offsets in TmpInst are already in mcasm units.
@@ -615,9 +602,8 @@ void McasmAsmPrinter::emitGlobalVariable(const GlobalVariable *GV) {
 
 // Register the AsmPrinter
 extern "C" LLVM_EXTERNAL_VISIBILITY void LLVMInitializeMcasmAsmPrinter() {
-  fprintf(stderr, "DEBUG: LLVMInitializeMcasmAsmPrinter called\n");
-  fflush(stderr);
+  MCASM_DEBUG_LOG("DEBUG: LLVMInitializeMcasmAsmPrinter called\n");
   RegisterAsmPrinter<McasmAsmPrinter> X(getTheMcasm_32Target());
-  fprintf(stderr, "DEBUG: LLVMInitializeMcasmAsmPrinter completed\n");
-  fflush(stderr);
+  MCASM_DEBUG_LOG("DEBUG: LLVMInitializeMcasmAsmPrinter completed\n");
 }
+

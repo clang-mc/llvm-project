@@ -1,4 +1,4 @@
-//===-- McasmAsmBackend.cpp - Mcasm Assembler Backend --------------------===//
+﻿//===-- McasmAsmBackend.cpp - Mcasm Assembler Backend --------------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -15,6 +15,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "MCTargetDesc/McasmBaseInfo.h"
+#include "TargetInfo/McasmDebug.h"
 #include "MCTargetDesc/McasmFixupKinds.h"
 #include "MCTargetDesc/McasmMCAsmInfo.h"
 #include "llvm/MC/MCAsmBackend.h"
@@ -118,10 +119,9 @@ MCAsmBackend *llvm::createMcasm_32AsmBackend(const Target &T,
                                              const MCSubtargetInfo &STI,
                                              const MCRegisterInfo &MRI,
                                              const MCTargetOptions &Options) {
-  fprintf(stderr, "DEBUG: createMcasm_32AsmBackend called\n");
-  fflush(stderr);
+  MCASM_DEBUG_LOG("DEBUG: createMcasm_32AsmBackend called\n");
   auto *Backend = new McasmAsmBackend(T, STI);
-  fprintf(stderr, "DEBUG: createMcasm_32AsmBackend completed, Backend=%p\n", (void*)Backend);
-  fflush(stderr);
+  MCASM_DEBUG_LOG("DEBUG: createMcasm_32AsmBackend completed, Backend=%p\n", (void*)Backend);
   return Backend;
 }
+

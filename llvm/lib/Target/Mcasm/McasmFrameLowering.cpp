@@ -1,4 +1,4 @@
-//===-- McasmFrameLowering.cpp - Mcasm Frame Lowering --------------------===//
+﻿//===-- McasmFrameLowering.cpp - Mcasm Frame Lowering --------------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -13,6 +13,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "McasmFrameLowering.h"
+#include "TargetInfo/McasmDebug.h"
 #include "McasmSubtarget.h"
 #include "McasmInstrInfo.h"
 #include "McasmRegisterInfo.h"
@@ -32,20 +33,16 @@ McasmFrameLowering::McasmFrameLowering(const McasmSubtarget &STI)
 
 void McasmFrameLowering::emitPrologue(MachineFunction &MF,
                                       MachineBasicBlock &MBB) const {
-  fprintf(stderr, "DEBUG emitPrologue: function=%s\n", MF.getName().str().c_str());
-  fflush(stderr);
+  MCASM_DEBUG_LOG("DEBUG emitPrologue: function=%s\n", MF.getName().str().c_str());
   // TODO: Implement when we have basic instructions defined
-  fprintf(stderr, "DEBUG emitPrologue: completed\n");
-  fflush(stderr);
+  MCASM_DEBUG_LOG("DEBUG emitPrologue: completed\n");
 }
 
 void McasmFrameLowering::emitEpilogue(MachineFunction &MF,
                                       MachineBasicBlock &MBB) const {
-  fprintf(stderr, "DEBUG emitEpilogue: function=%s\n", MF.getName().str().c_str());
-  fflush(stderr);
+  MCASM_DEBUG_LOG("DEBUG emitEpilogue: function=%s\n", MF.getName().str().c_str());
   // TODO: Implement when we have basic instructions defined
-  fprintf(stderr, "DEBUG emitEpilogue: completed\n");
-  fflush(stderr);
+  MCASM_DEBUG_LOG("DEBUG emitEpilogue: completed\n");
 }
 
 bool McasmFrameLowering::needsFrameIndexResolution(const MachineFunction &MF) const {
@@ -110,3 +107,4 @@ bool McasmFrameLowering::canSimplifyCallFramePseudos(
   // We can simplify call frame pseudos if we have a reserved call frame
   return hasReservedCallFrame(MF);
 }
+

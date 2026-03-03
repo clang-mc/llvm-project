@@ -1,4 +1,4 @@
-//===-- McasmISelLowering.cpp - Mcasm DAG Lowering Implementation --------===//
+﻿//===-- McasmISelLowering.cpp - Mcasm DAG Lowering Implementation --------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -13,6 +13,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "McasmISelLowering.h"
+#include "TargetInfo/McasmDebug.h"
 #include "Mcasm.h"
 #include "McasmCallingConv.h"
 #include "McasmSubtarget.h"
@@ -43,14 +44,24 @@ McasmTargetLowering::McasmTargetLowering(const McasmTargetMachine &TM,
 
   // Floating point - mcasm does not have FP hardware
   // f32 and f64 are NOT registered - LLVM will use TypeSoftenFloat to convert:
-  //   f32 → i32 (bit representation), f64 → i64 → two i32 halves
+  //   f32 鈫?i32 (bit representation), f64 鈫?i64 鈫?two i32 halves
   // All FP operations become software library calls (__addsf3, __adddf3, etc.)
 
   // i64 type handling - mcasm is 32-bit, so i64 operations need special handling
   // Tell LLVM that i64 is not a native type and should be promoted/expanded
   setOperationPromotedToType(ISD::LOAD, MVT::i1, MVT::i32);
   setOperationPromotedToType(ISD::STORE, MVT::i1, MVT::i32);
-
+  // Sub-32-bit values may still appear as extloads/truncstores after type
+  // legalization (e.g. i8 spills/reloads). Lower them explicitly as i32 slot
+  // accesses because mcasm has no byte/halfword memory ops.
+  setLoadExtAction(ISD::EXTLOAD, MVT::i32, MVT::i8, Custom);
+  setLoadExtAction(ISD::SEXTLOAD, MVT::i32, MVT::i8, Custom);
+  setLoadExtAction(ISD::ZEXTLOAD, MVT::i32, MVT::i8, Custom);
+  setLoadExtAction(ISD::EXTLOAD, MVT::i32, MVT::i16, Custom);
+  setLoadExtAction(ISD::SEXTLOAD, MVT::i32, MVT::i16, Custom);
+  setLoadExtAction(ISD::ZEXTLOAD, MVT::i32, MVT::i16, Custom);
+  setTruncStoreAction(MVT::i32, MVT::i8, Custom);
+  setTruncStoreAction(MVT::i32, MVT::i16, Custom);
   // Compute derived properties
   computeRegisterProperties(STI.getRegisterInfo());
 
@@ -216,7 +227,7 @@ McasmTargetLowering::McasmTargetLowering(const McasmTargetMachine &TM,
   setOperationAction(ISD::OR, MVT::i32, Custom);
   setOperationAction(ISD::XOR, MVT::i32, Custom);
   // CTTZ/CTLZ/CTPOP: Expand generates a de Bruijn byte-table lookup which
-  // requires i8 memory access — unsupported on Mcasm (word-addressed only).
+  // requires i8 memory access 鈥?unsupported on Mcasm (word-addressed only).
   // Use Custom lowering that only uses AND/OR/SRL/ADD/MUL (all Legal).
   setOperationAction(ISD::CTTZ,            MVT::i32, Custom);
   setOperationAction(ISD::CTTZ_ZERO_UNDEF, MVT::i32, Custom);
@@ -227,7 +238,7 @@ McasmTargetLowering::McasmTargetLowering(const McasmTargetMachine &TM,
   // Comparison operations
   // mcasm has no SETcc instruction. SETCC as a value is lowered to branchless
   // arithmetic (see lowerSETCC). This is Custom to avoid the infinite-loop that
-  // would otherwise occur: SETCC(Expand)→SELECT_CC→SETCC+SELECT→SELECT_CC→...
+  // would otherwise occur: SETCC(Expand)鈫扴ELECT_CC鈫扴ETCC+SELECT鈫扴ELECT_CC鈫?..
   setOperationAction(ISD::SETCC, MVT::i32, Custom);
 
   // Control flow operations
@@ -243,6 +254,8 @@ McasmTargetLowering::McasmTargetLowering(const McasmTargetMachine &TM,
 
   // Global addresses and constants
   setOperationAction(ISD::GlobalAddress, MVT::i32, Custom);
+  // mcasm is single-threaded: treat TLS globals as regular globals.
+  setOperationAction(ISD::GlobalTLSAddress, MVT::i32, Custom);
   setOperationAction(ISD::BlockAddress, MVT::i32, Custom);
   setOperationAction(ISD::ConstantPool, MVT::i32, Custom);
   setOperationAction(ISD::JumpTable, MVT::i32, Custom);
@@ -319,6 +332,19 @@ McasmTargetLowering::McasmTargetLowering(const McasmTargetMachine &TM,
 
 bool McasmTargetLowering::shouldPreservePtrArith(const Function &F, EVT PtrVT) const {
   return true;
+}
+
+bool McasmTargetLowering::allowsMisalignedMemoryAccesses(
+    EVT VT, unsigned AS, Align Alignment, MachineMemOperand::Flags Flags,
+    unsigned *Fast) const {
+  // mcasm models scalar memory as 32-bit slots. Treat sub-32-bit integer
+  // accesses and i32 accesses as naturally supported even with low IR align.
+  if (Fast)
+    *Fast = 1;
+  if (VT == MVT::i8 || VT == MVT::i16 || VT == MVT::i32)
+    return true;
+  return TargetLowering::allowsMisalignedMemoryAccesses(VT, AS, Alignment,
+                                                        Flags, Fast);
 }
 
 TargetLowering::ConstraintType
@@ -575,14 +601,14 @@ SDValue McasmTargetLowering::LowerReturn(
 
   // NOTE: mcasm RET instruction has NO parameters
   // Caller cleanup is done by caller using ADD rsp or POP after CALL
-  // (see ZH_Calling-Convention.md: "调用者清理")
+  // (see ZH_Calling-Convention.md: "璋冪敤鑰呮竻鐞?)
 
   // Copy return values to their assigned locations
   for (unsigned i = 0, e = RVLocs.size(); i != e; ++i) {
     CCValAssign &VA = RVLocs[i];
     assert(VA.isRegLoc() && "Only register returns are supported");
 
-    // Use VA.getValNo() — RVLocs entries can be multiple for a single original value
+    // Use VA.getValNo() 鈥?RVLocs entries can be multiple for a single original value
     SDValue Val = OutVals[VA.getValNo()];
 
     // f32 return values must be bitcast to i32 bits before writing to return register
@@ -620,7 +646,61 @@ const char *McasmTargetLowering::getTargetNodeName(unsigned Opcode) const {
 
 SDValue McasmTargetLowering::LowerOperation(SDValue Op, SelectionDAG &DAG) const {
   switch (Op.getOpcode()) {
+  case ISD::LOAD: {
+    auto *LD = cast<LoadSDNode>(Op);
+    if (LD->getExtensionType() == ISD::NON_EXTLOAD)
+      break;
+
+    MVT VT = Op.getSimpleValueType();
+    MVT MemVT = LD->getMemoryVT().getSimpleVT();
+    if (VT != MVT::i32 || (MemVT != MVT::i8 && MemVT != MVT::i16))
+      break;
+
+    SDLoc DL(Op);
+    SDValue WideLoad = DAG.getLoad(
+        MVT::i32, DL, LD->getChain(), LD->getBasePtr(), LD->getPointerInfo(),
+        LD->getAlign(), LD->getMemOperand()->getFlags(),
+        LD->getAAInfo(), LD->getRanges());
+    SDValue Value = WideLoad;
+
+    if (LD->getExtensionType() == ISD::ZEXTLOAD ||
+        LD->getExtensionType() == ISD::EXTLOAD) {
+      uint64_t Mask = (MemVT == MVT::i8) ? 0xFFu : 0xFFFFu;
+      Value = DAG.getNode(ISD::AND, DL, MVT::i32, Value,
+                          DAG.getConstant(Mask, DL, MVT::i32));
+    } else if (LD->getExtensionType() == ISD::SEXTLOAD) {
+      unsigned Shift = (MemVT == MVT::i8) ? 24u : 16u;
+      SDValue Amt = DAG.getConstant(Shift, DL, MVT::i32);
+      SDValue Shl = DAG.getNode(ISD::SHL, DL, MVT::i32, Value, Amt);
+      Value = DAG.getNode(ISD::SRA, DL, MVT::i32, Shl, Amt);
+    }
+
+    SDValue Ops[] = {Value, WideLoad.getValue(1)};
+    return DAG.getMergeValues(Ops, DL);
+  }
+  case ISD::STORE: {
+    auto *ST = cast<StoreSDNode>(Op);
+    if (!ST->isTruncatingStore())
+      break;
+
+    MVT MemVT = ST->getMemoryVT().getSimpleVT();
+    if (MemVT != MVT::i8 && MemVT != MVT::i16)
+      break;
+
+    SDLoc DL(Op);
+    SDValue Value = ST->getValue();
+    MVT ValVT = Value.getSimpleValueType();
+    if (ValVT.bitsGT(MVT::i32))
+      Value = DAG.getNode(ISD::TRUNCATE, DL, MVT::i32, Value);
+    else if (ValVT != MVT::i32)
+      Value = DAG.getNode(ISD::ZERO_EXTEND, DL, MVT::i32, Value);
+
+    return DAG.getStore(ST->getChain(), DL, Value, ST->getBasePtr(),
+                        ST->getPointerInfo(), ST->getAlign(),
+                        ST->getMemOperand()->getFlags(), ST->getAAInfo());
+  }
   case ISD::GlobalAddress:
+  case ISD::GlobalTLSAddress:
     return lowerGlobalAddress(Op, DAG);
   case ISD::BlockAddress:
     return lowerBlockAddress(Op, DAG);
@@ -792,19 +872,16 @@ SDValue McasmTargetLowering::lowerGlobalAddress(SDValue Op,
   // Functions require MOVD (more expensive, should be cached)
   // Data addresses use regular MOV
   bool isFunction = isa<Function>(GV);
-  fprintf(stderr, "DEBUG lowerGlobalAddress: GV=%s, isFunction=%d\n",
+  MCASM_DEBUG_LOG("DEBUG lowerGlobalAddress: GV=%s, isFunction=%d\n",
           GV->getName().str().c_str(), isFunction);
-  fflush(stderr);
 
   if (isFunction) {
     // Function address - use FunctionWrapper -> will match MOVD32ri
-    fprintf(stderr, "DEBUG: Using FunctionWrapper for %s\n", GV->getName().str().c_str());
-    fflush(stderr);
+    MCASM_DEBUG_LOG("DEBUG: Using FunctionWrapper for %s\n", GV->getName().str().c_str());
     return DAG.getNode(McasmISD::FunctionWrapper, DL, Ty, TargetAddr);
   } else {
     // Data address - use regular Wrapper -> will match MOV32ri
-    fprintf(stderr, "DEBUG: Using Wrapper for %s\n", GV->getName().str().c_str());
-    fflush(stderr);
+    MCASM_DEBUG_LOG("DEBUG: Using Wrapper for %s\n", GV->getName().str().c_str());
     return DAG.getNode(McasmISD::Wrapper, DL, Ty, TargetAddr);
   }
 }
@@ -932,26 +1009,26 @@ SDValue McasmTargetLowering::lowerBR_CC(SDValue Op, SelectionDAG &DAG) const {
 //     (d is 0 iff a==b; d | -d has bit 31 set iff d != 0)
 //   SETEQ = SETNE ^ 1
 //
-// ─────────────────────────────────────────────────────────────────────────────
-// CTTZ — Count Trailing Zeros (branchless, no byte-table lookup)
+// 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+// CTTZ 鈥?Count Trailing Zeros (branchless, no byte-table lookup)
 //
-// 根因：Expand 时 LLVM 生成 de Bruijn 序列乘法 + 32字节 i8 查表。
-//       Mcasm 是字节寻址不支持 i8 load，故必须 Custom 实现。
+// 鏍瑰洜锛欵xpand 鏃?LLVM 鐢熸垚 de Bruijn 搴忓垪涔樻硶 + 32瀛楄妭 i8 鏌ヨ〃銆?
+//       Mcasm 鏄瓧鑺傚鍧€涓嶆敮鎸?i8 load锛屾晠蹇呴』 Custom 瀹炵幇銆?
 //
-// 算法：令 lsb = x & (-x)（隔离最低置位比特，是2的幂）。
-//       CTZ 的第 k 位 = (lsb & mask_k) != 0，其中：
-//         mask_0 = 0xAAAAAAAA （位置为奇数的比特）
+// 绠楁硶锛氫护 lsb = x & (-x)锛堥殧绂绘渶浣庣疆浣嶆瘮鐗癸紝鏄?鐨勫箓锛夈€?
+//       CTZ 鐨勭 k 浣?= (lsb & mask_k) != 0锛屽叾涓細
+//         mask_0 = 0xAAAAAAAA 锛堜綅缃负濂囨暟鐨勬瘮鐗癸級
 //         mask_1 = 0xCCCCCCCC
 //         mask_2 = 0xF0F0F0F0
 //         mask_3 = 0xFF00FF00
 //         mask_4 = 0xFFFF0000
-//       IsNonzero(v) 使用 (v | (-v)) >> 31 实现（纯算术，无条件分支）。
+//       IsNonzero(v) 浣跨敤 (v | (-v)) >> 31 瀹炵幇锛堢函绠楁湳锛屾棤鏉′欢鍒嗘敮锛夈€?
 //
-// 正确性证明（以 mask_k 为例）：
-//   对于任意比特位置 i（0..31），i 的二进制第 k 位 = 1
-//   当且仅当 2^i 的对应 mask_k 中该位为 1。
-//   因此 (lsb & mask_k) != 0 ⟺ bit_k(CTZ(x)) = 1。    □
-// ─────────────────────────────────────────────────────────────────────────────
+// 姝ｇ‘鎬ц瘉鏄庯紙浠?mask_k 涓轰緥锛夛細
+//   瀵逛簬浠绘剰姣旂壒浣嶇疆 i锛?..31锛夛紝i 鐨勪簩杩涘埗绗?k 浣?= 1
+//   褰撲笖浠呭綋 2^i 鐨勫搴?mask_k 涓浣嶄负 1銆?
+//   鍥犳 (lsb & mask_k) != 0 鉄?bit_k(CTZ(x)) = 1銆?   鈻?
+// 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 SDValue McasmTargetLowering::lowerCTTZ(SDValue Op, SelectionDAG &DAG) const {
   SDLoc DL(Op);
   SDValue X    = Op.getOperand(0);
@@ -965,7 +1042,7 @@ SDValue McasmTargetLowering::lowerCTTZ(SDValue Op, SelectionDAG &DAG) const {
   SDValue NegX = DAG.getNode(ISD::ADD, DL, MVT::i32, NotX, C1);
   SDValue LSB  = DAG.getNode(ISD::AND, DL, MVT::i32, X, NegX);
 
-  // IsNonzero(V): (V | (-V)) >> 31  →  0 if V==0, 1 if V!=0
+  // IsNonzero(V): (V | (-V)) >> 31  鈫? 0 if V==0, 1 if V!=0
   auto IsNonzero = [&](SDValue V) -> SDValue {
     SDValue NotV = DAG.getNode(ISD::XOR, DL, MVT::i32, V, AllF);
     SDValue NegV = DAG.getNode(ISD::ADD, DL, MVT::i32, NotV, C1);
@@ -990,31 +1067,31 @@ SDValue McasmTargetLowering::lowerCTTZ(SDValue Op, SelectionDAG &DAG) const {
   Sum = DAG.getNode(ISD::ADD, DL, MVT::i32, Sum, BitK(0xFFFF0000u, 4));
 
   if (Op.getOpcode() == ISD::CTTZ_ZERO_UNDEF)
-    return Sum; // x=0 行为未定义，无需处理
+    return Sum; // x=0 琛屼负鏈畾涔夛紝鏃犻渶澶勭悊
 
-  // CTTZ(0) = 32：IsZero = XOR(IsNonzero(X), 1)，Extra = IsZero << 5
+  // CTTZ(0) = 32锛欼sZero = XOR(IsNonzero(X), 1)锛孍xtra = IsZero << 5
   SDValue IsZero = DAG.getNode(ISD::XOR, DL, MVT::i32, IsNonzero(X), C1);
   SDValue Extra  = DAG.getNode(ISD::SHL, DL, MVT::i32, IsZero,
                                 DAG.getConstant(5, DL, MVT::i32));
   return DAG.getNode(ISD::ADD, DL, MVT::i32, Sum, Extra);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// CTLZ — Count Leading Zeros
+// 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+// CTLZ 鈥?Count Leading Zeros
 //
-// 算法：
-//   1. 归一化：将 x 的最高置位比特以下全部置 1
+// 绠楁硶锛?
+//   1. 褰掍竴鍖栵細灏?x 鐨勬渶楂樼疆浣嶆瘮鐗逛互涓嬪叏閮ㄧ疆 1
 //      x |= x>>1; x |= x>>2; x |= x>>4; x |= x>>8; x |= x>>16
-//   2. popcount(x) = 32 - CLZ(原始 x)
-//   3. CLZ = 32 - popcount（Hamming weight，纯算术，无查表）
+//   2. popcount(x) = 32 - CLZ(鍘熷 x)
+//   3. CLZ = 32 - popcount锛圚amming weight锛岀函绠楁湳锛屾棤鏌ヨ〃锛?
 //
-// 特殊情况：x=0 → 归一化后仍为 0 → popcount=0 → CLZ=32 ✓
-// ─────────────────────────────────────────────────────────────────────────────
+// 鐗规畩鎯呭喌锛歺=0 鈫?褰掍竴鍖栧悗浠嶄负 0 鈫?popcount=0 鈫?CLZ=32 鉁?
+// 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 SDValue McasmTargetLowering::lowerCTLZ(SDValue Op, SelectionDAG &DAG) const {
   SDLoc DL(Op);
   SDValue X = Op.getOperand(0);
 
-  // Step 1: normalize — fill all bits below MSB with 1s
+  // Step 1: normalize 鈥?fill all bits below MSB with 1s
   auto OrShr = [&](SDValue V, unsigned sh) -> SDValue {
     return DAG.getNode(ISD::OR, DL, MVT::i32, V,
                         DAG.getNode(ISD::SRL, DL, MVT::i32, V,
@@ -1061,11 +1138,11 @@ SDValue McasmTargetLowering::lowerCTLZ(SDValue Op, SelectionDAG &DAG) const {
                       DAG.getConstant(32, DL, MVT::i32), N);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// CTPOP — Population Count (Hamming weight)
+// 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+// CTPOP 鈥?Population Count (Hamming weight)
 //
-// 经典并行前缀算法，仅用 AND/SRL/ADD/SUB/MUL，无查表。
-// ─────────────────────────────────────────────────────────────────────────────
+// 缁忓吀骞惰鍓嶇紑绠楁硶锛屼粎鐢?AND/SRL/ADD/SUB/MUL锛屾棤鏌ヨ〃銆?
+// 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 SDValue McasmTargetLowering::lowerCTPOP(SDValue Op, SelectionDAG &DAG) const {
   SDLoc DL(Op);
   SDValue X = Op.getOperand(0);
@@ -1161,8 +1238,8 @@ SDValue McasmTargetLowering::lowerSETCC(SDValue Op, SelectionDAG &DAG) const {
 // 0/1, and (b) i1 conditions are zero-extended to i32 during type legalization.
 //
 // Formula: result = FalseVal + (-Cond) & (TrueVal - FalseVal)
-//   When Cond=1: -Cond=0xFFFFFFFF → mask=TrueVal-FalseVal → result=TrueVal
-//   When Cond=0: -Cond=0          → mask=0                → result=FalseVal
+//   When Cond=1: -Cond=0xFFFFFFFF 鈫?mask=TrueVal-FalseVal 鈫?result=TrueVal
+//   When Cond=0: -Cond=0          鈫?mask=0                鈫?result=FalseVal
 //
 SDValue McasmTargetLowering::lowerSELECT(SDValue Op, SelectionDAG &DAG) const {
   SDLoc DL(Op);
@@ -1386,3 +1463,4 @@ SDValue McasmTargetLowering::LowerI64LibCall(SDValue Op, SelectionDAG &DAG,
 
   return CallResult.first;
 }
+

@@ -1,4 +1,4 @@
-//===-- McasmMCCodeEmitter.cpp - Mcasm Code Emitter ----------------------===//
+﻿//===-- McasmMCCodeEmitter.cpp - Mcasm Code Emitter ----------------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -16,6 +16,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "MCTargetDesc/McasmBaseInfo.h"
+#include "TargetInfo/McasmDebug.h"
 #include "MCTargetDesc/McasmFixupKinds.h"
 #include "MCTargetDesc/McasmMCAsmInfo.h"
 #include "llvm/MC/MCCodeEmitter.h"
@@ -64,10 +65,9 @@ public:
 
 MCCodeEmitter *llvm::createMcasmMCCodeEmitter(const MCInstrInfo &MCII,
                                               MCContext &Ctx) {
-  fprintf(stderr, "DEBUG: createMcasmMCCodeEmitter called\n");
-  fflush(stderr);
+  MCASM_DEBUG_LOG("DEBUG: createMcasmMCCodeEmitter called\n");
   auto *Emitter = new McasmMCCodeEmitter(MCII, Ctx);
-  fprintf(stderr, "DEBUG: createMcasmMCCodeEmitter completed, Emitter=%p\n", (void*)Emitter);
-  fflush(stderr);
+  MCASM_DEBUG_LOG("DEBUG: createMcasmMCCodeEmitter completed, Emitter=%p\n", (void*)Emitter);
   return Emitter;
 }
+
