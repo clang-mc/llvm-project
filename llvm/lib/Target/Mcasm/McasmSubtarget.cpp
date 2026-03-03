@@ -212,6 +212,7 @@ void McasmSubtarget::initLibcallLoweringInfo(LibcallLoweringInfo &Info) const {
   Info.setLibcallImpl(RTLIB::OGT_F32, RTLIB::impl___gtsf2);
   Info.setLibcallImpl(RTLIB::OGE_F32, RTLIB::impl___gesf2);
   Info.setLibcallImpl(RTLIB::UNE_F32, RTLIB::impl___nesf2);
+  Info.setLibcallImpl(RTLIB::UO_F32, RTLIB::impl___unordsf2);
 
   // -----------------------------------------------------------------------
   // Floating-point comparisons (f64)
@@ -222,6 +223,7 @@ void McasmSubtarget::initLibcallLoweringInfo(LibcallLoweringInfo &Info) const {
   Info.setLibcallImpl(RTLIB::OGT_F64, RTLIB::impl___gtdf2);
   Info.setLibcallImpl(RTLIB::OGE_F64, RTLIB::impl___gedf2);
   Info.setLibcallImpl(RTLIB::UNE_F64, RTLIB::impl___nedf2);
+  Info.setLibcallImpl(RTLIB::UO_F64, RTLIB::impl___unorddf2);
 
   // -----------------------------------------------------------------------
   // FP type conversions

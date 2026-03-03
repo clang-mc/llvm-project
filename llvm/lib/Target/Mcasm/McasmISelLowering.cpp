@@ -167,6 +167,23 @@ McasmTargetLowering::McasmTargetLowering(const McasmTargetMachine &TM,
   setOperationAction(ISD::SETCC, MVT::f32, Expand);
   setOperationAction(ISD::SETCC, MVT::f64, Expand);
 
+  // Soft-float compare libcalls used by SETCC expansion.
+  // Include unordered compare to support UEQ/UNO/ORD paths.
+  setLibcallImpl(RTLIB::OEQ_F32, RTLIB::impl___eqsf2);
+  setLibcallImpl(RTLIB::OLT_F32, RTLIB::impl___ltsf2);
+  setLibcallImpl(RTLIB::OLE_F32, RTLIB::impl___lesf2);
+  setLibcallImpl(RTLIB::OGT_F32, RTLIB::impl___gtsf2);
+  setLibcallImpl(RTLIB::OGE_F32, RTLIB::impl___gesf2);
+  setLibcallImpl(RTLIB::UNE_F32, RTLIB::impl___nesf2);
+  setLibcallImpl(RTLIB::UO_F32, RTLIB::impl___unordsf2);
+  setLibcallImpl(RTLIB::OEQ_F64, RTLIB::impl___eqdf2);
+  setLibcallImpl(RTLIB::OLT_F64, RTLIB::impl___ltdf2);
+  setLibcallImpl(RTLIB::OLE_F64, RTLIB::impl___ledf2);
+  setLibcallImpl(RTLIB::OGT_F64, RTLIB::impl___gtdf2);
+  setLibcallImpl(RTLIB::OGE_F64, RTLIB::impl___gedf2);
+  setLibcallImpl(RTLIB::UNE_F64, RTLIB::impl___nedf2);
+  setLibcallImpl(RTLIB::UO_F64, RTLIB::impl___unorddf2);
+
   // Floating point conversions
   setOperationAction(ISD::FP_TO_SINT, MVT::i32, Expand);
   setOperationAction(ISD::FP_TO_UINT, MVT::i32, Expand);
