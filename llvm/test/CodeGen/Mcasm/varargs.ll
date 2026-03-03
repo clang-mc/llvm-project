@@ -47,7 +47,28 @@ entry:
   ret i32 %v
 }
 
+declare i32 @vcallee(i32, ...)
+
+define i32 @vararg_call_shadow(i32 %a0, i32 %a1, i32 %a2, i32 %a3, i32 %a4,
+                               i32 %a5, i32 %a6, i32 %a7, i32 %a8, i32 %a9) {
+entry:
+  %r = call i32 (i32, ...) @vcallee(i32 1, i32 %a0, i32 %a1, i32 %a2, i32 %a3,
+                                     i32 %a4, i32 %a5, i32 %a6, i32 %a7,
+                                     i32 %a8, i32 %a9)
+  ret i32 %r
+}
+
 ; CHECK-LABEL: sum_first_two:
+; CHECK-NOT: mov [rsp], r1
+; CHECK: mov [rsp+1], r1
+; CHECK: mov [rsp+7], r7
 ; CHECK-LABEL: read_i64:
 ; CHECK-LABEL: copy_and_read:
 ; CHECK-LABEL: stack_vararg_after_8_regs:
+; CHECK: add {{[a-z][0-9]+}}, 8
+; CHECK: mov rax, [{{[a-z][0-9]+}}]
+; CHECK-LABEL: vararg_call_shadow:
+; CHECK: add {{[a-z][0-9]+}}, 10
+; CHECK: add {{[a-z][0-9]+}}, 9
+; CHECK: add {{[a-z][0-9]+}}, 8
+; CHECK: call vcallee

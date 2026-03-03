@@ -4366,7 +4366,7 @@ bool SelectionDAGLegalize::ExpandNode(SDNode *Node) {
                                      Tmp2.getOperand(0).getValueType())) {
       Tmp1 = DAG.getNode(ISD::BR_CC, dl, MVT::Other, Tmp1, Tmp2.getOperand(2),
                          Tmp2.getOperand(0), Tmp2.getOperand(1),
-                         Node->getOperand(2));
+                         Node->getOperand(2), Tmp2->getFlags());
     } else {
       // We test only the i1 bit.  Skip the AND if UNDEF or another AND.
       if (Tmp2.isUndef() ||
@@ -4550,12 +4550,13 @@ bool SelectionDAGLegalize::ExpandNode(SDNode *Node) {
       assert(!NeedInvert && "Don't know how to invert BR_CC!");
 
       Tmp1 = DAG.getNode(ISD::BR_CC, dl, Node->getValueType(0), Tmp1,
-                         Tmp4, Tmp2, Tmp3, Node->getOperand(4));
+                         Tmp4, Tmp2, Tmp3, Node->getOperand(4),
+                         Node->getFlags());
     } else {
       Tmp3 = DAG.getConstant(0, dl, Tmp2.getValueType());
       Tmp4 = DAG.getCondCode(NeedInvert ? ISD::SETEQ : ISD::SETNE);
       Tmp1 = DAG.getNode(ISD::BR_CC, dl, Node->getValueType(0), Tmp1, Tmp4,
-                         Tmp2, Tmp3, Node->getOperand(4));
+                         Tmp2, Tmp3, Node->getOperand(4), Node->getFlags());
     }
     Results.push_back(Tmp1);
     break;
@@ -5804,7 +5805,8 @@ void SelectionDAGLegalize::PromoteNode(SDNode *Node) {
     Tmp2 = DAG.getNode(ExtOp, dl, NVT, Node->getOperand(3));
     Results.push_back(DAG.getNode(ISD::BR_CC, dl, Node->getValueType(0),
                                   Node->getOperand(0), Node->getOperand(1),
-                                  Tmp1, Tmp2, Node->getOperand(4)));
+                                  Tmp1, Tmp2, Node->getOperand(4),
+                                  Node->getFlags()));
     break;
   }
   case ISD::FADD:

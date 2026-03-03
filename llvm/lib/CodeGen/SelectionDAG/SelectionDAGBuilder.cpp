@@ -2474,6 +2474,8 @@ SelectionDAGBuilder::EmitBranchForMergedCondition(const Value *Cond,
       if (const ICmpInst *IC = dyn_cast<ICmpInst>(Cond)) {
         ICmpInst::Predicate Pred =
             InvertCond ? IC->getInversePredicate() : IC->getPredicate();
+        if (IC->hasSameSign())
+          Pred = ICmpInst::getSignedPredicate(Pred);
         Condition = getICmpCondCode(Pred);
       } else {
         const FCmpInst *FC = cast<FCmpInst>(Cond);
@@ -2898,10 +2900,22 @@ void SelectionDAGBuilder::visitBr(const BranchInst &I) {
   }
 
   // Create a CaseBlock record representing this branch.
-  CaseBlock CB(ISD::SETEQ, CondVal, ConstantInt::getTrue(*DAG.getContext()),
-               nullptr, Succ0MBB, Succ1MBB, BrMBB, getCurSDLoc(),
-               BranchProbability::getUnknown(), BranchProbability::getUnknown(),
-               IsUnpredictable);
+  // For icmp samesign, branch lowering currently cannot reliably preserve
+  // SameSign through all DAG combine/legalize paths, so canonicalize
+  // samesign unsigned predicates to signed predicates here.
+  CaseBlock CB = [&]() -> CaseBlock {
+    if (const auto *IC = dyn_cast<ICmpInst>(CondVal); IC && IC->hasSameSign()) {
+      ICmpInst::Predicate Pred = ICmpInst::getSignedPredicate(IC->getPredicate());
+      return CaseBlock(getICmpCondCode(Pred), IC->getOperand(0),
+                       IC->getOperand(1), nullptr, Succ0MBB, Succ1MBB, BrMBB,
+                       getCurSDLoc(), BranchProbability::getUnknown(),
+                       BranchProbability::getUnknown(), IsUnpredictable);
+    }
+    return CaseBlock(ISD::SETEQ, CondVal, ConstantInt::getTrue(*DAG.getContext()),
+                     nullptr, Succ0MBB, Succ1MBB, BrMBB, getCurSDLoc(),
+                     BranchProbability::getUnknown(),
+                     BranchProbability::getUnknown(), IsUnpredictable);
+  }();
 
   // Use visitSwitchCase to actually insert the fast branch sequence for this
   // cond branch.
@@ -3785,11 +3799,11 @@ void SelectionDAGBuilder::visitICmp(const ICmpInst &I) {
 
   SDNodeFlags Flags;
   Flags.setSameSign(I.hasSameSign());
-  SelectionDAG::FlagInserter FlagsInserter(DAG, Flags);
 
   EVT DestVT = DAG.getTargetLoweringInfo().getValueType(DAG.getDataLayout(),
                                                         I.getType());
-  setValue(&I, DAG.getSetCC(getCurSDLoc(), DestVT, Op1, Op2, Opcode));
+  setValue(&I, DAG.getSetCC(getCurSDLoc(), DestVT, Op1, Op2, Opcode,
+                            /*Chain=*/{}, /*IsSignaling=*/false, Flags));
 }
 
 void SelectionDAGBuilder::visitFCmp(const FCmpInst &I) {

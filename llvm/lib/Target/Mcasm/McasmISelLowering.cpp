@@ -24,6 +24,7 @@
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/CodeGen/SelectionDAG.h"
+#include "llvm/Support/ErrorHandling.h"
 
 using namespace llvm;
 
@@ -35,6 +36,18 @@ using namespace llvm;
 
 // NOTE: We use C++ custom calling convention instead of TableGen
 // #include "McasmGenCallingConv.inc"
+
+// Normalize samesign unsigned integer predicates to signed variants.
+// For same-sign operands, unsigned and signed ordering are equivalent.
+static ISD::CondCode normalizeSameSignIntCC(ISD::CondCode CC) {
+  switch (CC) {
+  case ISD::SETUGT: return ISD::SETGT;
+  case ISD::SETUGE: return ISD::SETGE;
+  case ISD::SETULT: return ISD::SETLT;
+  case ISD::SETULE: return ISD::SETLE;
+  default: return CC;
+  }
+}
 
 McasmTargetLowering::McasmTargetLowering(const McasmTargetMachine &TM,
                                          const McasmSubtarget &STI)
@@ -436,10 +449,17 @@ SDValue McasmTargetLowering::LowerFormalArguments(
   MachineFunction &MF = DAG.getMachineFunction();
   MachineFrameInfo &MFI = MF.getFrameInfo();
   MachineRegisterInfo &RegInfo = MF.getRegInfo();
+  constexpr unsigned ArgSlotSize = 4;
+  constexpr unsigned NumArgRegs = 8;
+  constexpr unsigned VarArgRegSaveAreaSize = NumArgRegs * ArgSlotSize;
 
   // Analyze incoming arguments according to calling convention
   SmallVector<CCValAssign, 16> ArgLocs;
   CCState CCInfo(CallConv, isVarArg, MF, ArgLocs, *DAG.getContext());
+  // Reserve a fixed incoming register-save area for variadic calls.
+  // This keeps stack varargs disjoint from callee spills of r0-r7.
+  if (isVarArg)
+    CCInfo.AllocateStack(VarArgRegSaveAreaSize, Align(ArgSlotSize));
   CCInfo.AnalyzeFormalArguments(Ins, CC_Mcasm);
 
   for (unsigned i = 0, e = ArgLocs.size(); i != e; ++i) {
@@ -470,28 +490,27 @@ SDValue McasmTargetLowering::LowerFormalArguments(
     static const MCPhysReg ArgRegs[] = {Mcasm::r0, Mcasm::r1, Mcasm::r2,
                                         Mcasm::r3, Mcasm::r4, Mcasm::r5,
                                         Mcasm::r6, Mcasm::r7};
-    constexpr int ArgSlotSize = 4;
-
     auto *FuncInfo = MF.getInfo<McasmMachineFunctionInfo>();
     SmallVector<SDValue, 8> OutChains;
     unsigned FirstVAReg = CCInfo.getFirstUnallocated(ArgRegs);
+    const unsigned NumRegs = sizeof(ArgRegs) / sizeof(ArgRegs[0]);
 
-    if (FirstVAReg < (sizeof(ArgRegs) / sizeof(ArgRegs[0]))) {
-      int VarArgsOffset = CCInfo.getStackSize();
-      int FirstFI = MFI.CreateFixedObject(ArgSlotSize, VarArgsOffset, true);
+    if (FirstVAReg < NumRegs) {
+      // Save remaining argument registers into their canonical shadow slots.
+      // Slot i corresponds to argument register ri.
+      int FirstOffset = static_cast<int>(FirstVAReg * ArgSlotSize);
+      int FirstFI = MFI.CreateFixedObject(ArgSlotSize, FirstOffset, true);
       FuncInfo->setVarArgsFrameIndex(FirstFI);
 
-      for (unsigned I = FirstVAReg, S = (sizeof(ArgRegs) / sizeof(ArgRegs[0]));
-           I < S; ++I) {
+      for (unsigned I = FirstVAReg; I < NumRegs; ++I) {
         unsigned RegVReg = RegInfo.createVirtualRegister(&Mcasm::GR32RegClass);
         RegInfo.addLiveIn(ArgRegs[I], RegVReg);
         SDValue Val = DAG.getCopyFromReg(Chain, dl, RegVReg, MVT::i32);
 
-        unsigned RegOffset = (I - FirstVAReg) * ArgSlotSize;
-        int FI = (RegOffset == 0)
+        int Offset = static_cast<int>(I * ArgSlotSize);
+        int FI = (I == FirstVAReg)
                      ? FirstFI
-                     : MFI.CreateFixedObject(ArgSlotSize,
-                                             VarArgsOffset + RegOffset, true);
+                     : MFI.CreateFixedObject(ArgSlotSize, Offset, true);
         SDValue Addr = DAG.getFrameIndex(FI, MVT::i32);
         SDValue Store = DAG.getStore(
             Val.getValue(1), dl, Val, Addr, MachinePointerInfo::getFixedStack(MF, FI));
@@ -530,6 +549,11 @@ SDValue McasmTargetLowering::LowerCall(
   // Analyze outgoing arguments
   SmallVector<CCValAssign, 16> ArgLocs;
   CCState CCInfo(CallConv, isVarArg, MF, ArgLocs, *DAG.getContext());
+  constexpr unsigned ArgSlotSize = 4;
+  constexpr unsigned NumArgRegs = 8;
+  constexpr unsigned VarArgRegSaveAreaSize = NumArgRegs * ArgSlotSize;
+  if (isVarArg)
+    CCInfo.AllocateStack(VarArgRegSaveAreaSize, Align(ArgSlotSize));
   CCInfo.AnalyzeCallOperands(Outs, CC_Mcasm);
 
   // Get the size of the outgoing arguments stack space
@@ -583,7 +607,9 @@ SDValue McasmTargetLowering::LowerCall(
     } else {
       // Stack argument
       assert(VA.isMemLoc() && "Expected memory location");
-      SDValue PtrOff = DAG.getIntPtrConstant(VA.getLocMemOffset(), dl);
+      // CCState offsets are in bytes; mcasm addresses memory in 4-byte units.
+      int64_t ByteOff = VA.getLocMemOffset();
+      SDValue PtrOff = DAG.getIntPtrConstant(ByteOff / ArgSlotSize, dl);
       PtrOff = DAG.getNode(ISD::ADD, dl, MVT::i32,
                            DAG.getRegister(Mcasm::rsp, MVT::i32), PtrOff);
       MemOpChains.push_back(DAG.getStore(Chain, dl, Arg, PtrOff,
@@ -954,10 +980,14 @@ SDValue McasmTargetLowering::LowerOperation(SDValue Op, SelectionDAG &DAG) const
 SDValue McasmTargetLowering::lowerVASTART(SDValue Op,
                                           SelectionDAG &DAG) const {
   MachineFunction &MF = DAG.getMachineFunction();
+  MachineFrameInfo &MFI = MF.getFrameInfo();
   auto *FuncInfo = MF.getInfo<McasmMachineFunctionInfo>();
   SDLoc DL(Op);
   EVT PtrVT = getPointerTy(DAG.getDataLayout());
+  assert(MF.getFunction().isVarArg() && "vastart in non-variadic function");
   int VarArgsFI = FuncInfo->getVarArgsFrameIndex();
+  if (!MFI.isFixedObjectIndex(VarArgsFI))
+    report_fatal_error("mcasm: varargs frame index is not initialized");
   const auto *TFI = static_cast<const McasmFrameLowering *>(
       MF.getSubtarget().getFrameLowering());
   Register FrameReg;
@@ -1097,6 +1127,8 @@ SDValue McasmTargetLowering::lowerBRCOND(SDValue Op, SelectionDAG &DAG) const {
     SDValue LHS = Cond.getOperand(0);
     SDValue RHS = Cond.getOperand(1);
     ISD::CondCode CC = cast<CondCodeSDNode>(Cond.getOperand(2))->get();
+    if (Cond->getFlags().hasSameSign())
+      CC = normalizeSameSignIntCC(CC);
 
     // mcasm only has signed comparison instructions (JG/JL/JGE/JLE).
     // Convert unsigned comparisons to signed by XOR-ing both operands
@@ -1137,6 +1169,8 @@ SDValue McasmTargetLowering::lowerBR_CC(SDValue Op, SelectionDAG &DAG) const {
   SDValue LHS   = Op.getOperand(2);
   SDValue RHS   = Op.getOperand(3);
   SDValue Dest  = Op.getOperand(4);
+  if (Op->getFlags().hasSameSign())
+    CC = normalizeSameSignIntCC(CC);
 
   // mcasm only has signed comparison instructions (JG/JL/JGE/JLE).
   // Convert unsigned comparisons to signed by XOR-ing both operands
@@ -1346,6 +1380,8 @@ SDValue McasmTargetLowering::lowerSETCC(SDValue Op, SelectionDAG &DAG) const {
   SDValue LHS = Op.getOperand(0);
   SDValue RHS = Op.getOperand(1);
   ISD::CondCode CC = cast<CondCodeSDNode>(Op.getOperand(2))->get();
+  if (Op->getFlags().hasSameSign())
+    CC = normalizeSameSignIntCC(CC);
 
   // Only handle i32 operands; other types are handled elsewhere.
   if (LHS.getSimpleValueType() != MVT::i32)
