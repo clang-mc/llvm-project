@@ -127,10 +127,11 @@ def GR32_SAVED : RegisterClass<"Mcasm", [i32], 32,
   (add x0, x1, x2, x3, x4, x5, x6, x7,
        x8, x9, x10, x11, x12, x13, x14, x15)>;
 
-// All general-purpose 32-bit registers (including rax)
-// Allocation order: argument regs -> temp regs -> saved regs -> rax
+// All general-purpose 32-bit registers (including rax/rsp).
+// rsp is still reserved by register info and won't be allocated.
+// Allocation order: argument regs -> temp regs -> saved regs -> rax -> rsp
 def GR32 : RegisterClass<"Mcasm", [i32], 32,
-  (add GR32_ARG, GR32_TMP, GR32_SAVED, rax)> {
+  (add GR32_ARG, GR32_TMP, GR32_SAVED, rax, rsp)> {
   let isAllocatable = 1;
 }
 

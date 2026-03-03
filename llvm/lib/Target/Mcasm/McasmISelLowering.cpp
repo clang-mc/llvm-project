@@ -16,6 +16,7 @@
 #include "TargetInfo/McasmDebug.h"
 #include "Mcasm.h"
 #include "McasmCallingConv.h"
+#include "McasmMachineFunctionInfo.h"
 #include "McasmSubtarget.h"
 #include "McasmTargetMachine.h"
 #include "llvm/CodeGen/CallingConvLower.h"
@@ -267,7 +268,7 @@ McasmTargetLowering::McasmTargetLowering(const McasmTargetMachine &TM,
 
   // Expand unsupported operations
   setOperationAction(ISD::VASTART, MVT::Other, Custom);
-  setOperationAction(ISD::VAARG, MVT::Other, Expand);
+  setOperationAction(ISD::VAARG, MVT::Other, Custom);
   setOperationAction(ISD::VACOPY, MVT::Other, Expand);
   setOperationAction(ISD::VAEND, MVT::Other, Expand);
 
@@ -406,6 +407,7 @@ SDValue McasmTargetLowering::LowerFormalArguments(
     SelectionDAG &DAG, SmallVectorImpl<SDValue> &InVals) const {
   MachineFunction &MF = DAG.getMachineFunction();
   MachineFrameInfo &MFI = MF.getFrameInfo();
+  MachineRegisterInfo &RegInfo = MF.getRegInfo();
 
   // Analyze incoming arguments according to calling convention
   SmallVector<CCValAssign, 16> ArgLocs;
@@ -418,8 +420,8 @@ SDValue McasmTargetLowering::LowerFormalArguments(
     if (VA.isRegLoc()) {
       // Argument passed in register
       const TargetRegisterClass *RC = &Mcasm::GR32RegClass;
-      unsigned VReg = MF.getRegInfo().createVirtualRegister(RC);
-      MF.getRegInfo().addLiveIn(VA.getLocReg(), VReg);
+      unsigned VReg = RegInfo.createVirtualRegister(RC);
+      RegInfo.addLiveIn(VA.getLocReg(), VReg);
       SDValue ArgValue = DAG.getCopyFromReg(Chain, dl, VReg, MVT::i32);
       // f32 parameters are passed as i32 bits (BCvt), restore to f32
       if (VA.getLocInfo() == CCValAssign::BCvt)
@@ -433,6 +435,50 @@ SDValue McasmTargetLowering::LowerFormalArguments(
       SDValue Load = DAG.getLoad(MVT::i32, dl, Chain, FINode,
                                   MachinePointerInfo::getFixedStack(MF, FI));
       InVals.push_back(Load);
+    }
+  }
+
+  if (isVarArg) {
+    static const MCPhysReg ArgRegs[] = {Mcasm::r0, Mcasm::r1, Mcasm::r2,
+                                        Mcasm::r3, Mcasm::r4, Mcasm::r5,
+                                        Mcasm::r6, Mcasm::r7};
+    constexpr int ArgSlotSize = 4;
+
+    auto *FuncInfo = MF.getInfo<McasmMachineFunctionInfo>();
+    SmallVector<SDValue, 8> OutChains;
+    unsigned FirstVAReg = CCInfo.getFirstUnallocated(ArgRegs);
+
+    if (FirstVAReg < (sizeof(ArgRegs) / sizeof(ArgRegs[0]))) {
+      int VarArgsOffset = CCInfo.getStackSize();
+      int FirstFI = MFI.CreateFixedObject(ArgSlotSize, VarArgsOffset, true);
+      FuncInfo->setVarArgsFrameIndex(FirstFI);
+
+      for (unsigned I = FirstVAReg, S = (sizeof(ArgRegs) / sizeof(ArgRegs[0]));
+           I < S; ++I) {
+        unsigned RegVReg = RegInfo.createVirtualRegister(&Mcasm::GR32RegClass);
+        RegInfo.addLiveIn(ArgRegs[I], RegVReg);
+        SDValue Val = DAG.getCopyFromReg(Chain, dl, RegVReg, MVT::i32);
+
+        unsigned RegOffset = (I - FirstVAReg) * ArgSlotSize;
+        int FI = (RegOffset == 0)
+                     ? FirstFI
+                     : MFI.CreateFixedObject(ArgSlotSize,
+                                             VarArgsOffset + RegOffset, true);
+        SDValue Addr = DAG.getFrameIndex(FI, MVT::i32);
+        SDValue Store = DAG.getStore(
+            Val.getValue(1), dl, Val, Addr, MachinePointerInfo::getFixedStack(MF, FI));
+        OutChains.push_back(Store);
+      }
+    } else {
+      // All argument registers are consumed by fixed parameters.
+      // Variable arguments start in the incoming stack argument area.
+      int FI = MFI.CreateFixedObject(ArgSlotSize, CCInfo.getStackSize(), true);
+      FuncInfo->setVarArgsFrameIndex(FI);
+    }
+
+    if (!OutChains.empty()) {
+      OutChains.push_back(Chain);
+      Chain = DAG.getNode(ISD::TokenFactor, dl, MVT::Other, OutChains);
     }
   }
 
@@ -796,8 +842,9 @@ SDValue McasmTargetLowering::LowerOperation(SDValue Op, SelectionDAG &DAG) const
     return SDValue();
 
   case ISD::VASTART:
-    // Minimal varargs support - expand to nothing for now
-    return SDValue();
+    return lowerVASTART(Op, DAG);
+  case ISD::VAARG:
+    return lowerVAARG(Op, DAG);
 
   case ISD::PTRADD: {
     // CRITICAL: mcasm uses 4-BYTE address units, not byte addressing!
@@ -855,6 +902,77 @@ SDValue McasmTargetLowering::LowerOperation(SDValue Op, SelectionDAG &DAG) const
     break;
   }
   return SDValue(); // operation not handled
+}
+
+SDValue McasmTargetLowering::lowerVASTART(SDValue Op,
+                                          SelectionDAG &DAG) const {
+  MachineFunction &MF = DAG.getMachineFunction();
+  auto *FuncInfo = MF.getInfo<McasmMachineFunctionInfo>();
+  SDLoc DL(Op);
+  EVT PtrVT = getPointerTy(DAG.getDataLayout());
+  int VarArgsFI = FuncInfo->getVarArgsFrameIndex();
+  const auto *TFI = static_cast<const McasmFrameLowering *>(
+      MF.getSubtarget().getFrameLowering());
+  Register FrameReg;
+  StackOffset Offset = TFI->getFrameIndexReference(MF, VarArgsFI, FrameReg);
+
+  SDValue VarArgsAddr = DAG.getRegister(FrameReg, PtrVT);
+  int64_t FixedOff = Offset.getFixed();
+  if (FixedOff != 0) {
+    VarArgsAddr = DAG.getNode(ISD::ADD, DL, PtrVT, VarArgsAddr,
+                              DAG.getConstant(FixedOff, DL, PtrVT));
+  }
+
+  // vastart stores the address of the first vararg slot into the va_list.
+  const Value *SV = cast<SrcValueSDNode>(Op.getOperand(2))->getValue();
+  return DAG.getStore(Op.getOperand(0), DL, VarArgsAddr, Op.getOperand(1),
+                      MachinePointerInfo(SV));
+}
+
+SDValue McasmTargetLowering::lowerVAARG(SDValue Op, SelectionDAG &DAG) const {
+  SDNode *Node = Op.getNode();
+  EVT VT = Node->getValueType(0);
+  SDValue Chain = Node->getOperand(0);
+  SDValue VAListPtr = Node->getOperand(1);
+  const Value *SV = cast<SrcValueSDNode>(Node->getOperand(2))->getValue();
+  SDLoc DL(Node);
+  EVT PtrVT = getPointerTy(DAG.getDataLayout());
+
+  constexpr uint64_t AddressUnitBytes = 4;
+  auto bytesToAddressUnits = [AddressUnitBytes](uint64_t Bytes) -> uint64_t {
+    return (Bytes + AddressUnitBytes - 1) / AddressUnitBytes;
+  };
+
+  SDValue VAListLoad =
+      DAG.getLoad(PtrVT, DL, Chain, VAListPtr, MachinePointerInfo(SV));
+  SDValue VAList = VAListLoad;
+
+  const MaybeAlign MA(Node->getConstantOperandVal(3));
+  if (MA && *MA > getMinStackArgumentAlignment()) {
+    uint64_t AlignUnits = bytesToAddressUnits(MA->value());
+    if (AlignUnits == 0)
+      AlignUnits = 1;
+    VAList = DAG.getNode(ISD::ADD, DL, PtrVT, VAList,
+                         DAG.getConstant(AlignUnits - 1, DL, PtrVT));
+    VAList = DAG.getNode(ISD::AND, DL, PtrVT, VAList,
+                         DAG.getSignedConstant(-(int64_t)AlignUnits, DL, PtrVT));
+  }
+
+  uint64_t ArgBytes = DAG.getDataLayout()
+                          .getTypeAllocSize(VT.getTypeForEVT(*DAG.getContext()))
+                          .getKnownMinValue();
+  uint64_t ArgUnits = bytesToAddressUnits(ArgBytes);
+  if (ArgUnits == 0)
+    ArgUnits = 1;
+  SDValue NextVAList = DAG.getNode(ISD::ADD, DL, PtrVT, VAList,
+                                   DAG.getConstant(ArgUnits, DL, PtrVT));
+
+  // Store the incremented va_list pointer.
+  Chain = DAG.getStore(VAListLoad.getValue(1), DL, NextVAList, VAListPtr,
+                       MachinePointerInfo(SV));
+
+  // Load the current argument from the original va_list pointer.
+  return DAG.getLoad(VT, DL, Chain, VAList, MachinePointerInfo());
 }
 
 SDValue McasmTargetLowering::lowerGlobalAddress(SDValue Op,

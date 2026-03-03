@@ -33,6 +33,7 @@
 #include "llvm/Support/FormattedStream.h"
 #include "llvm/Support/Errc.h"
 #include "McasmTargetObjectFile.h"
+#include "McasmMachineFunctionInfo.h"
 #include "llvm/CodeGen/TargetPassConfig.h"
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Pass.h"
@@ -150,8 +151,10 @@ TargetTransformInfo McasmTargetMachine::getTargetTransformInfo(const Function &F
 }
 
 MachineFunctionInfo *McasmTargetMachine::createMachineFunctionInfo(
-    BumpPtrAllocator &, const Function &, const TargetSubtargetInfo *) const {
-  return nullptr;
+    BumpPtrAllocator &Allocator, const Function &F,
+    const TargetSubtargetInfo *STI) const {
+  return McasmMachineFunctionInfo::create<McasmMachineFunctionInfo>(Allocator,
+                                                                     F, STI);
 }
 
 yaml::MachineFunctionInfo *McasmTargetMachine::createDefaultFuncInfoYAML() const {
