@@ -28,7 +28,7 @@ std::string llvm::rewriteMcasmSharedName(StringRef Name) {
   for (char C : Name) {
     unsigned char Byte = static_cast<unsigned char>(C);
     if ((Byte >= 'a' && Byte <= 'z') || (Byte >= '0' && Byte <= '9') ||
-        Byte == '_') {
+        Byte == '_' || Byte == '/') {
       Encoded.push_back(static_cast<char>(Byte));
       continue;
     }
