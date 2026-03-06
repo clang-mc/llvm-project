@@ -986,7 +986,16 @@ Constant *SymbolicallyEvaluateGEP(const GEPOperator *GEP,
     NW |= GEPNoWrapFlags::noUnsignedWrap();
 
   // Otherwise canonicalize this to a single ptradd.
+  //
+  // ptradd is represented as a GEP over i8. That representation is only
+  // semantics-preserving when i8 has unit alloc size. On targets that model
+  // i8 with a larger alloc size (for example i8:32), rebuilding as ptradd
+  // changes the effective offset and can trigger non-converging rewrites in
+  // InstCombine.
   LLVMContext &Ctx = Ptr->getContext();
+  if (DL.getTypeAllocSize(Type::getInt8Ty(Ctx)) != 1)
+    return nullptr;
+
   return ConstantExpr::getPtrAdd(Ptr, ConstantInt::get(Ctx, Offset), NW,
                                  InRange);
 }

@@ -104,6 +104,8 @@
 COMPILER_RT_ABI int __paritysi2(si_int a);
 COMPILER_RT_ABI int __paritydi2(di_int a);
 
+COMPILER_RT_ABI di_int __adddi3(di_int a, di_int b);
+COMPILER_RT_ABI di_int __subdi3(di_int a, di_int b);
 COMPILER_RT_ABI di_int __divdi3(di_int a, di_int b);
 COMPILER_RT_ABI si_int __divsi3(si_int a, si_int b);
 COMPILER_RT_ABI su_int __udivsi3(su_int n, su_int d);

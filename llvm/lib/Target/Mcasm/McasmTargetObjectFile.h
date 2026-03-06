@@ -15,8 +15,15 @@
 #define LLVM_LIB_TARGET_MCASM_MCASMTARGETOBJECTFILE_H
 
 #include "llvm/CodeGen/TargetLoweringObjectFileImpl.h"
+#include <string>
 
 namespace llvm {
+
+class StringRef;
+
+/// Encode a shared mcasm symbol suffix into the restricted character set used
+/// after `_ll_shared:`.
+std::string rewriteMcasmSharedName(StringRef Name);
 
 // Use ELF as base since mcasm primarily targets ELF-like output
 class McasmTargetObjectFile : public TargetLoweringObjectFileELF {

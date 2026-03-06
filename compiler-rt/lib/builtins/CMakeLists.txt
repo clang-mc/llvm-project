@@ -74,6 +74,7 @@ set(GENERIC_SOURCES
   absvsi2.c
   absvti2.c
   adddf3.c
+  adddi3.c
   addsf3.c
   addvdi3.c
   addvsi3.c
@@ -171,6 +172,7 @@ set(GENERIC_SOURCES
   powidf2.c
   powisf2.c
   subdf3.c
+  subdi3.c
   subsf3.c
   subvdi3.c
   subvsi3.c

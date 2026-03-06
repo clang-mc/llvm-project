@@ -20,6 +20,29 @@
 
 using namespace llvm;
 
+std::string llvm::rewriteMcasmSharedName(StringRef Name) {
+  static constexpr char HexDigits[] = "0123456789abcdef";
+
+  std::string Encoded;
+  Encoded.reserve(Name.size() * 3);
+  for (char C : Name) {
+    unsigned char Byte = static_cast<unsigned char>(C);
+    if ((Byte >= 'a' && Byte <= 'z') || (Byte >= '0' && Byte <= '9') ||
+        Byte == '_') {
+      Encoded.push_back(static_cast<char>(Byte));
+      continue;
+    }
+    if (Byte == '-') {
+      Encoded += "--";
+      continue;
+    }
+    Encoded.push_back('-');
+    Encoded.push_back(HexDigits[Byte >> 4]);
+    Encoded.push_back(HexDigits[Byte & 0x0f]);
+  }
+  return Encoded;
+}
+
 MCSymbol *McasmTargetObjectFile::getTargetSymbol(const GlobalValue *GV,
                                                   const TargetMachine &TM) const {
   SmallString<128> NameStr;
@@ -29,7 +52,7 @@ MCSymbol *McasmTargetObjectFile::getTargetSymbol(const GlobalValue *GV,
     // For functions with dllexport or dllimport, add _ll_shared: prefix
     if (GV->hasDLLExportStorageClass() || GV->hasDLLImportStorageClass()) {
       NameStr = "_ll_shared:";
-      NameStr += F->getName();
+      NameStr += rewriteMcasmSharedName(F->getName());
       return getContext().getOrCreateSymbol(NameStr);
     }
     // For regular functions without DLL storage class, use plain name

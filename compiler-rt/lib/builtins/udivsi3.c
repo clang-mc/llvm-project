@@ -19,7 +19,30 @@ typedef si_int fixint_t;
 // Returns: a / b
 
 COMPILER_RT_ABI su_int __udivsi3(su_int a, su_int b) {
-  return __udivXi3(a, b);
+if (b == 0) return 0;
+
+  int64_t n = (int64_t)(uint64_t)a;
+  int64_t d = (int64_t)(uint64_t)b;
+
+  if (n < d) return 0;
+  if (d == 1) return a;
+
+  int64_t q = 0;
+
+  while (n >= d) {
+    int64_t t = d;
+    int64_t m = 1;
+
+    while (t <= (n / 2)) {
+      t = t * 2;
+      m = m * 2;
+    }
+
+    n -= t;
+    q += m;
+  }
+
+  return (unsigned int)q;
 }
 
 #if defined(__ARM_EABI__)

@@ -17,6 +17,7 @@
 #define LLVM_LIB_TARGET_MCASM_MCASMASMPRINTER_H
 
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/CodeGen/AsmPrinter.h"
 
@@ -25,6 +26,8 @@ namespace llvm {
 class MCStreamer;
 class McasmSubtarget;
 class McasmMCInstLower;
+class GlobalAlias;
+class GlobalIFunc;
 
 class LLVM_LIBRARY_VISIBILITY McasmAsmPrinter : public AsmPrinter {
   const McasmSubtarget *Subtarget;
@@ -35,6 +38,7 @@ class LLVM_LIBRARY_VISIBILITY McasmAsmPrinter : public AsmPrinter {
   };
   DenseMap<const Function *, unsigned> InlineAsmCounter;
   SmallVector<InlineAsmHelperRecord, 16> InlineAsmHelpers;
+  SmallPtrSet<const GlobalAlias *, 16> MacroAliases;
 
 public:
   explicit McasmAsmPrinter(TargetMachine &TM,
@@ -52,6 +56,8 @@ public:
   void emitFunctionBodyEnd() override;
   void emitInstruction(const MachineInstr *MI) override;
   void emitGlobalVariable(const GlobalVariable *GV) override;
+  void emitGlobalAlias(const Module &M, const GlobalAlias &GA) override;
+  void emitGlobalIFunc(Module &M, const GlobalIFunc &GI) override;
   bool PrintAsmOperand(const MachineInstr *MI, unsigned OpNo,
                        const char *ExtraCode, raw_ostream &O) override;
   bool PrintAsmMemoryOperand(const MachineInstr *MI, unsigned OpNo,

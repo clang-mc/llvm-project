@@ -122,6 +122,16 @@ public:
   /// This allows us to convert byte offsets to mcasm's 4-byte address units
   bool shouldPreservePtrArith(const Function &F, EVT PtrVT) const override;
 
+  /// mcasm assembler has no .rodata concept, so jump tables are unsupported.
+  /// Force switch lowering to use branch trees/bit-tests instead of JTI data.
+  bool areJTsAllowed(const Function *Fn) const override { return false; }
+
+  /// mcasm assembly does not support symbol+offset operands for globals.
+  /// Force global base materialization plus explicit arithmetic in registers.
+  bool isOffsetFoldingLegal(const GlobalAddressSDNode *GA) const override {
+    return false;
+  }
+
   bool allowsMisalignedMemoryAccesses(EVT VT, unsigned AS, Align Alignment,
                                       MachineMemOperand::Flags Flags,
                                       unsigned *Fast) const override;

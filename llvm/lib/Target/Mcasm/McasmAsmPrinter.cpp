@@ -29,6 +29,7 @@
 #include "Mcasm.h"
 #include "McasmMCInstLower.h"
 #include "McasmSubtarget.h"
+#include "McasmTargetObjectFile.h"
 #include "TargetInfo/McasmTargetInfo.h"
 #include "llvm/CodeGen/MachineConstantPool.h"
 #include "llvm/CodeGen/MachineFunction.h"
@@ -37,6 +38,8 @@
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/GlobalAlias.h"
+#include "llvm/IR/GlobalIFunc.h"
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/InlineAsm.h"
 #include "llvm/IR/Mangler.h"
@@ -104,6 +107,20 @@ static std::string makeAlphaFieldName(unsigned Index) {
   } while (true);
   std::reverse(Name.begin(), Name.end());
   return Name;
+}
+
+static bool isMacroIdentifier(StringRef Name) {
+  if (Name.empty())
+    return false;
+  auto IsIdStart = [](char C) {
+    return std::isalpha(static_cast<unsigned char>(C)) || C == '_';
+  };
+  auto IsIdChar = [](char C) {
+    return std::isalnum(static_cast<unsigned char>(C)) || C == '_';
+  };
+  if (!IsIdStart(Name.front()))
+    return false;
+  return llvm::all_of(Name.drop_front(), IsIdChar);
 }
 
 struct InlineAsmOperandDesc {
@@ -251,12 +268,39 @@ void McasmAsmPrinter::emitStartOfAsmFile(Module &M) {
   OutStreamer->emitRawText("#include \"_ll_std\"");
   OutStreamer->emitRawText("");  // Blank line
 
+  // mcasm has no native symbol alias syntax (e.g. "a = b").
+  // Materialize direct aliases as preprocessor defines.
+  MacroAliases.clear();
+  bool EmittedAliasDefines = false;
+  for (const GlobalAlias &GA : M.aliases()) {
+    if (GA.hasAvailableExternallyLinkage())
+      continue;
+    const auto *Aliasee =
+        dyn_cast<GlobalValue>(GA.getAliasee()->stripPointerCasts());
+    if (!Aliasee)
+      continue;
+    MCSymbol *AliasSym = getSymbol(&GA);
+    MCSymbol *TargetSym = getSymbol(Aliasee);
+    StringRef AliasName = AliasSym->getName();
+    StringRef TargetName = TargetSym->getName();
+    if (AliasName == TargetName)
+      continue;
+    if (!isMacroIdentifier(AliasName) || !isMacroIdentifier(TargetName))
+      continue;
+    OutStreamer->emitRawText(
+        (Twine("#define ") + AliasName + " " + TargetName).str());
+    MacroAliases.insert(&GA);
+    EmittedAliasDefines = true;
+  }
+  if (EmittedAliasDefines)
+    OutStreamer->emitRawText("");
+
   // Emit extern declarations for dllimport functions
   for (const Function &F : M) {
     if (F.isDeclaration() && F.hasDLLImportStorageClass()) {
       // Generate: extern _ll_shared:funcname:
-      std::string ExternDecl = "extern _ll_shared:";
-      ExternDecl += F.getName();
+      std::string ExternDecl = "extern ";
+      ExternDecl += getSymbol(&F)->getName();
       ExternDecl += ":";
       MCASM_DEBUG_LOG("DEBUG:   Emitting extern declaration: %s\n", ExternDecl.c_str());
       OutStreamer->emitRawText(ExternDecl);
@@ -339,7 +383,9 @@ bool McasmAsmPrinter::emitMcasmInlineAsmWrapper(const MachineInstr *MI) {
   std::string HelperBody = rewriteMcasmInlineHelperBody(Replaced);
 
   unsigned Seq = InlineAsmCounter[&F]++;
-  std::string Label = (Twine("_ll_shared:z/") + F.getName() + "_" + Twine(Seq)).str();
+  std::string HelperName =
+      rewriteMcasmSharedName((Twine("z/") + F.getName() + "_" + Twine(Seq)).str());
+  std::string Label = (Twine("_ll_shared:") + HelperName).str();
   InlineAsmHelpers.push_back({Label, HelperBody});
 
   std::string Init = "inline data modify storage std:vm s0 set value {";
@@ -528,6 +574,19 @@ void McasmAsmPrinter::emitInstruction(const MachineInstr *MI) {
   // NOTE: Memory offsets in TmpInst are already in mcasm units.
   // Do NOT perform any offset conversion here!
   EmitToStreamer(*OutStreamer, TmpInst);
+}
+
+void McasmAsmPrinter::emitGlobalAlias(const Module &, const GlobalAlias &GA) {
+  if (!MacroAliases.contains(&GA)) {
+    report_fatal_error(Twine("mcasm does not support this alias form: ") +
+                       GA.getName());
+  }
+  // Handled in emitStartOfAsmFile() as #define lines.
+  // Suppress default AsmPrinter alias assignment emission.
+}
+
+void McasmAsmPrinter::emitGlobalIFunc(Module &, const GlobalIFunc &GI) {
+  report_fatal_error(Twine("mcasm does not support ifunc: ") + GI.getName());
 }
 
 void McasmAsmPrinter::emitGlobalVariable(const GlobalVariable *GV) {

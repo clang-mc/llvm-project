@@ -1382,8 +1382,10 @@ SDValue McasmTargetLowering::lowerGlobalAddress(SDValue Op,
   const GlobalValue *GV = N->getGlobal();
   int64_t Offset = N->getOffset();
 
-  // Create a TargetGlobalAddress node
-  SDValue TargetAddr = DAG.getTargetGlobalAddress(GV, DL, Ty, Offset);
+  // mcasm does not support symbol+offset syntax. Materialize symbol base only,
+  // then apply offsets with PTRADD so lowering can convert byte offsets to the
+  // target's address units.
+  SDValue TargetAddr = DAG.getTargetGlobalAddress(GV, DL, Ty, 0);
 
   // Check if this is a function address
   // Functions require MOVD (more expensive, should be cached)
@@ -1392,15 +1394,21 @@ SDValue McasmTargetLowering::lowerGlobalAddress(SDValue Op,
   MCASM_DEBUG_LOG("DEBUG lowerGlobalAddress: GV=%s, isFunction=%d\n",
           GV->getName().str().c_str(), isFunction);
 
+  SDValue BaseAddr;
   if (isFunction) {
     // Function address - use FunctionWrapper -> will match MOVD32ri
     MCASM_DEBUG_LOG("DEBUG: Using FunctionWrapper for %s\n", GV->getName().str().c_str());
-    return DAG.getNode(McasmISD::FunctionWrapper, DL, Ty, TargetAddr);
+    BaseAddr = DAG.getNode(McasmISD::FunctionWrapper, DL, Ty, TargetAddr);
   } else {
     // Data address - use regular Wrapper -> will match MOV32ri
     MCASM_DEBUG_LOG("DEBUG: Using Wrapper for %s\n", GV->getName().str().c_str());
-    return DAG.getNode(McasmISD::Wrapper, DL, Ty, TargetAddr);
+    BaseAddr = DAG.getNode(McasmISD::Wrapper, DL, Ty, TargetAddr);
   }
+
+  if (Offset == 0)
+    return BaseAddr;
+  return DAG.getNode(ISD::PTRADD, DL, Ty, BaseAddr,
+                     DAG.getConstant(Offset, DL, Ty));
 }
 
 SDValue McasmTargetLowering::lowerBlockAddress(SDValue Op,
@@ -1411,8 +1419,12 @@ SDValue McasmTargetLowering::lowerBlockAddress(SDValue Op,
   const BlockAddress *BA = N->getBlockAddress();
   int64_t Offset = N->getOffset();
 
-  SDValue TargetAddr = DAG.getTargetBlockAddress(BA, Ty, Offset);
-  return DAG.getNode(McasmISD::Wrapper, DL, Ty, TargetAddr);
+  SDValue TargetAddr = DAG.getTargetBlockAddress(BA, Ty, 0);
+  SDValue BaseAddr = DAG.getNode(McasmISD::Wrapper, DL, Ty, TargetAddr);
+  if (Offset == 0)
+    return BaseAddr;
+  return DAG.getNode(ISD::PTRADD, DL, Ty, BaseAddr,
+                     DAG.getConstant(Offset, DL, Ty));
 }
 
 SDValue McasmTargetLowering::lowerConstantPool(SDValue Op,
@@ -1423,8 +1435,12 @@ SDValue McasmTargetLowering::lowerConstantPool(SDValue Op,
   const Constant *C = N->getConstVal();
   int64_t Offset = N->getOffset();
 
-  SDValue TargetAddr = DAG.getTargetConstantPool(C, Ty, N->getAlign(), Offset);
-  return DAG.getNode(McasmISD::Wrapper, DL, Ty, TargetAddr);
+  SDValue TargetAddr = DAG.getTargetConstantPool(C, Ty, N->getAlign(), 0);
+  SDValue BaseAddr = DAG.getNode(McasmISD::Wrapper, DL, Ty, TargetAddr);
+  if (Offset == 0)
+    return BaseAddr;
+  return DAG.getNode(ISD::PTRADD, DL, Ty, BaseAddr,
+                     DAG.getConstant(Offset, DL, Ty));
 }
 
 SDValue McasmTargetLowering::lowerJumpTable(SDValue Op,

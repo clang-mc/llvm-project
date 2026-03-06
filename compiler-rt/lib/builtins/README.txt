@@ -69,6 +69,8 @@ uint64_t __bswapdi2(uint64_t a);   // a byteswapped
 
 di_int __negdi2    (di_int a);                         // -a
 ti_int __negti2    (ti_int a);                         // -a
+di_int __adddi3    (di_int a, di_int b);               // a + b
+di_int __subdi3    (di_int a, di_int b);               // a - b
 di_int __muldi3    (di_int a, di_int b);               // a * b
 ti_int __multi3    (ti_int a, ti_int b);               // a * b
 si_int __divsi3    (si_int a, si_int b);               // a / b   signed
