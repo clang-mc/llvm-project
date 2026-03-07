@@ -161,8 +161,8 @@ public:
 
   bool canUseCMPXCHG8B() const { return hasCX8(); }
   bool canUseCMPXCHG16B() const { return false; } // No 64-bit support
-  // Mcasm only supports 32-bit mode
-  bool canUseCMOV() const { return hasCMOV(); }
+  // Mcasm does not support conditional moves.
+  bool canUseCMOV() const { return false; }
 
   // Mcasm does not support SSE/AVX - all methods return false
   bool hasSSE1() const { return false; }

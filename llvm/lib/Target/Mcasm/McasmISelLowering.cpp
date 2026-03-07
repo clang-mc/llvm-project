@@ -288,8 +288,9 @@ McasmTargetLowering::McasmTargetLowering(const McasmTargetMachine &TM,
   setOperationAction(ISD::CTPOP,           MVT::i32, Custom);
 
   // Comparison operations
-  // mcasm has no SETcc instruction. Lower i32 SETCC values with custom
-  // branchless arithmetic in lowerSETCC.
+  // mcasm has no native setcc result instruction. Keep custom lowering for
+  // standalone compare-to-bool values, but prefer CFG-based lowering for
+  // select-like constructs to avoid introducing soft bitop libcalls.
   setOperationAction(ISD::SETCC, MVT::i32, Custom);
 
   // Control flow operations

@@ -174,7 +174,7 @@ const RegisterBankInfo *McasmSubtarget::getRegBankInfo() const {
 }
 
 bool McasmSubtarget::enableEarlyIfConversion() const {
-  return hasCMOV() && McasmEarlyIfConv;
+  return false;
 }
 
 void McasmSubtarget::getPostRAMutations(

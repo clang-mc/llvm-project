@@ -50,9 +50,6 @@ def Mode32Bit : SubtargetFeature<"mode-32bit", "Is32Bit_", "true",
 
 
 // Basic instruction set features
-def FeatureCMOV : SubtargetFeature<"cmov", "HasCMOV", "true",
-                                    "Enable conditional move instructions">;
-
 def FeatureNOPL : SubtargetFeature<"nopl", "HasNOPL", "true",
                                     "Enable NOPL instruction">;
 
@@ -116,13 +113,13 @@ class Proc<string Name, list<SubtargetFeature> Features>
 //===----------------------------------------------------------------------===//
 
 // Generic 32-bit processor
-def : Proc<"generic", [FeatureCMOV, FeatureNOPL, FeatureCX8, Is32Bit]>;
+def : Proc<"generic", [FeatureNOPL, FeatureCX8, Is32Bit]>;
 
 // Basic i386 compatible processor
 def : Proc<"i386", [Is32Bit]>;
 
 // i686 compatible processor
-def : Proc<"i686", [FeatureCMOV, FeatureNOPL, Is32Bit]>;
+def : Proc<"i686", [FeatureNOPL, Is32Bit]>;
 
 //===----------------------------------------------------------------------===//
 // Target Declaration

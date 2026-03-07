@@ -9,6 +9,7 @@
 #include "Mcasm.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
@@ -16,6 +17,7 @@
 #include "llvm/IR/Type.h"
 #include "llvm/Pass.h"
 #include "llvm/Support/CommandLine.h"
+#include "llvm/Transforms/Utils/BasicBlockUtils.h"
 
 using namespace llvm;
 
@@ -74,6 +76,85 @@ static bool matchSExtToI64(Value *V, Value *&Src, IntegerType *&SrcTy) {
     return false;
   Src = SI->getOperand(0);
   return true;
+}
+
+static bool isShiftByBitWidthMinusOne(Value *V, Value *X) {
+  auto *CI = dyn_cast<ConstantInt>(V);
+  if (!CI || !X->getType()->isIntegerTy())
+    return false;
+  unsigned BW = cast<IntegerType>(X->getType())->getBitWidth();
+  return CI->getValue() == BW - 1;
+}
+
+static bool matchSignedSignMask(Value *V, Value *X) {
+  auto *BO = dyn_cast<BinaryOperator>(V);
+  return BO && BO->getOpcode() == Instruction::AShr &&
+         BO->getOperand(0) == X &&
+         isShiftByBitWidthMinusOne(BO->getOperand(1), X);
+}
+
+static Value *buildBranchFriendlyAbs(Instruction &InsertBefore, Value *X,
+                                     bool IntMinIsPoison) {
+  auto *ITy = cast<IntegerType>(X->getType());
+  IRBuilder<> HeadBuilder(&InsertBefore);
+  Value *Zero = ConstantInt::get(ITy, 0);
+  Value *IsNeg = HeadBuilder.CreateICmpSLT(X, Zero, X->getName() + ".isneg");
+
+  BasicBlock *ThenBB = nullptr;
+  BasicBlock *ElseBB = nullptr;
+  SplitBlockAndInsertIfThenElse(IsNeg, &InsertBefore, &ThenBB, &ElseBB);
+
+  BasicBlock *TailBB = InsertBefore.getParent();
+  IRBuilder<> ThenBuilder(ThenBB->getTerminator());
+  Value *NegX = ThenBuilder.CreateNeg(X, X->getName() + ".neg", IntMinIsPoison);
+
+  auto *Phi =
+      PHINode::Create(ITy, 2, X->getName() + ".abs", &InsertBefore);
+  Phi->addIncoming(NegX, ThenBB);
+  Phi->addIncoming(X, ElseBB);
+  return Phi;
+}
+
+static Value *getBitTrickAbsInput(Instruction &I) {
+  auto *Sub = dyn_cast<BinaryOperator>(&I);
+  if (!Sub || Sub->getOpcode() != Instruction::Sub ||
+      !Sub->getType()->isIntegerTy())
+    return nullptr;
+
+  Value *Mask = Sub->getOperand(1);
+  auto *Xor = dyn_cast<BinaryOperator>(Sub->getOperand(0));
+  if (!Xor || Xor->getOpcode() != Instruction::Xor)
+    return nullptr;
+
+  Value *X = nullptr;
+  if (Xor->getOperand(1) == Mask && matchSignedSignMask(Mask, Xor->getOperand(0)))
+    X = Xor->getOperand(0);
+  else if (Xor->getOperand(0) == Mask &&
+           matchSignedSignMask(Mask, Xor->getOperand(1)))
+    X = Xor->getOperand(1);
+  else
+    return nullptr;
+
+  return X;
+}
+
+static Value *matchBitTrickAbs(Instruction &I) {
+  Value *X = getBitTrickAbsInput(I);
+  if (!X)
+    return nullptr;
+  return buildBranchFriendlyAbs(I, X, false);
+}
+
+static Value *branchifySelect(SelectInst &Sel) {
+  BasicBlock *ThenBB = nullptr;
+  BasicBlock *ElseBB = nullptr;
+  SplitBlockAndInsertIfThenElse(Sel.getCondition(), &Sel, &ThenBB, &ElseBB);
+
+  auto *Phi =
+      PHINode::Create(Sel.getType(), 2, Sel.getName() + ".branch", &Sel);
+  Phi->addIncoming(Sel.getTrueValue(), ThenBB);
+  Phi->addIncoming(Sel.getFalseValue(), ElseBB);
+  return Phi;
 }
 
 bool McasmLowerBitOpsPass::runOnModule(Module &M) {
@@ -152,6 +233,60 @@ bool McasmLowerBitOpsPass::runOnModule(Module &M) {
   for (Function &F : M) {
     if (F.isDeclaration() || isRuntimeFunctionName(F.getName()))
       continue;
+
+    SmallVector<SelectInst *, 32> SelectsToBranchify;
+    SmallVector<Instruction *, 16> AbsToBranchify;
+    for (BasicBlock &BB : F) {
+      for (Instruction &I : BB) {
+        if (auto *Sel = dyn_cast<SelectInst>(&I)) {
+          if (Sel->getType()->isIntegerTy(32) || Sel->getType()->isIntegerTy(64))
+            SelectsToBranchify.push_back(Sel);
+          continue;
+        }
+
+        if (auto *II = dyn_cast<IntrinsicInst>(&I)) {
+          if (II->getIntrinsicID() == Intrinsic::abs &&
+              II->getType()->isIntegerTy(32)) {
+            AbsToBranchify.push_back(II);
+            continue;
+          }
+        }
+
+        if (I.getType()->isIntegerTy(32) && getBitTrickAbsInput(I)) {
+          AbsToBranchify.push_back(&I);
+          continue;
+        }
+      }
+    }
+
+    for (SelectInst *Sel : SelectsToBranchify) {
+      if (!Sel->getParent())
+        continue;
+      Value *BrSel = branchifySelect(*Sel);
+      Sel->replaceAllUsesWith(BrSel);
+      ToErase.push_back(Sel);
+      Changed = true;
+    }
+
+    for (Instruction *I : AbsToBranchify) {
+      if (!I->getParent())
+        continue;
+
+      Value *AbsV = nullptr;
+      if (auto *II = dyn_cast<IntrinsicInst>(I)) {
+        bool IntMinIsPoison =
+            cast<ConstantInt>(II->getArgOperand(1))->isOne();
+        AbsV = buildBranchFriendlyAbs(*II, II->getArgOperand(0), IntMinIsPoison);
+      } else {
+        AbsV = matchBitTrickAbs(*I);
+      }
+      if (!AbsV)
+        continue;
+
+      I->replaceAllUsesWith(AbsV);
+      ToErase.push_back(I);
+      Changed = true;
+    }
 
     SmallVector<PHINode *, 16> PhisToErase;
     for (BasicBlock &BB : F) {

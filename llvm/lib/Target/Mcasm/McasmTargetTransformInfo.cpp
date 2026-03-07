@@ -276,19 +276,19 @@ InstructionCost McasmTTIImpl::getArithmeticInstrCost(
   int ISD = TLI->InstructionOpcodeToISD(Opcode);
   assert(ISD && "Invalid opcode");
 
-  // Mcasm bitwise ops are lowered via software runtime paths in this backend
-  // configuration, so model scalar integer bitwise ops as expensive to
-  // discourage introducing them when arithmetic alternatives exist.
+  // Scalar Mcasm bitwise ops are lowered to software helper calls. Model them
+  // as extremely expensive so IR and DAG combines prefer branches/arithmetic
+  // over branchless bit tricks.
   if (LT.second.isScalarInteger()) {
     switch (ISD) {
     case ISD::AND:
     case ISD::OR:
     case ISD::XOR:
-      return LT.first * 8;
+      return LT.first * 128;
     case ISD::SHL:
     case ISD::SRL:
     case ISD::SRA:
-      return LT.first * 10;
+      return LT.first * 192;
     default:
       break;
     }
@@ -4399,7 +4399,7 @@ McasmTTIImpl::getIntrinsicInstrCost(const IntrinsicCostAttributes &ICA,
     { ISD::CTPOP,      MVT::i8,      {  1,  1,  2,  2 } }, // popcnt(zext())
   };
   static const CostKindTblEntry X64CostTbl[] = { // 64-bit targets
-    { ISD::ABS,        MVT::i64,     {  1,  2,  3,  3 } }, // SUB+CMOV
+    { ISD::ABS,        MVT::i64,     {  2,  2,  3,  3 } }, // CMP+BRANCH+NEG
     { ISD::BITREVERSE, MVT::i64,     { 10, 12, 20, 22 } },
     { ISD::BSWAP,      MVT::i64,     {  1,  2,  1,  2 } },
     { ISD::CTLZ,       MVT::i64,     {  1,  2,  3,  3 } }, // MOV+BSR+XOR
@@ -4431,8 +4431,8 @@ McasmTTIImpl::getIntrinsicInstrCost(const IntrinsicCostAttributes &ICA,
     { ISD::UMULO,      MVT::i64,     {  8,  8,  4,  7 } },
   };
   static const CostKindTblEntry McasmCostTbl[] = { // 32 or 64-bit targets
-    { ISD::ABS,        MVT::i32,     {  1,  2,  3,  3 } }, // SUB+XOR+SRA or SUB+CMOV
-    { ISD::ABS,        MVT::i16,     {  2,  2,  3,  3 } }, // SUB+XOR+SRA or SUB+CMOV
+    { ISD::ABS,        MVT::i32,     {  2,  2,  3,  3 } }, // CMP+BRANCH+NEG
+    { ISD::ABS,        MVT::i16,     {  2,  2,  3,  3 } }, // CMP+BRANCH+NEG
     { ISD::ABS,        MVT::i8,      {  2,  4,  4,  3 } }, // SUB+XOR+SRA
     { ISD::BITREVERSE, MVT::i32,     {  9, 12, 17, 19 } },
     { ISD::BITREVERSE, MVT::i16,     {  9, 12, 17, 19 } },
@@ -6209,7 +6209,8 @@ InstructionCost McasmTTIImpl::getCFInstrCost(unsigned Opcode,
                                            const Instruction *I) const {
   if (CostKind != TTI::TCK_RecipThroughput)
     return Opcode == Instruction::PHI ? TTI::TCC_Free : TTI::TCC_Basic;
-  // Branches are assumed to be predicted.
+  // On mcfunction, the cost of taking the "wrong" branch is very small
+  // compared to synthesizing branchless control flow with soft bitops.
   return TTI::TCC_Free;
 }
 
@@ -7193,8 +7194,7 @@ InstructionCost McasmTTIImpl::getScalingFactorCost(Type *Ty, GlobalValue *BaseGV
 }
 
 InstructionCost McasmTTIImpl::getBranchMispredictPenalty() const {
-  // TODO: Hook MispredictPenalty of SchedMachineModel into this.
-  return 14;
+  return 1;
 }
 
 bool McasmTTIImpl::isVectorShiftByScalarCheap(Type *Ty) const {
