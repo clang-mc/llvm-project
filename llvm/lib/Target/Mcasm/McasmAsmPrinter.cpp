@@ -256,6 +256,74 @@ static std::string rewriteMcasmInlineHelperBody(StringRef Body) {
   return Out;
 }
 
+static void appendMcasmInitAtom(std::string &Output, bool &NeedComma,
+                                StringRef Value) {
+  if (NeedComma)
+    Output += ", ";
+  Output += Value;
+  NeedComma = true;
+}
+
+static void appendMcasmZeroInit(Type *Ty, std::string &Output, bool &NeedComma) {
+  if (auto *ATy = dyn_cast<ArrayType>(Ty)) {
+    for (uint64_t I = 0, E = ATy->getNumElements(); I != E; ++I)
+      appendMcasmZeroInit(ATy->getElementType(), Output, NeedComma);
+    return;
+  }
+
+  if (auto *STy = dyn_cast<StructType>(Ty)) {
+    for (Type *EltTy : STy->elements())
+      appendMcasmZeroInit(EltTy, Output, NeedComma);
+    return;
+  }
+
+  appendMcasmInitAtom(Output, NeedComma, "0");
+}
+
+static void appendMcasmInitializer(const Constant *C, std::string &Output,
+                                   bool &NeedComma) {
+  if (C->isNullValue()) {
+    appendMcasmZeroInit(C->getType(), Output, NeedComma);
+    return;
+  }
+
+  if (const auto *CDS = dyn_cast<ConstantDataSequential>(C)) {
+    for (unsigned I = 0, E = CDS->getNumElements(); I != E; ++I)
+      appendMcasmInitAtom(Output, NeedComma,
+                          std::to_string(CDS->getElementAsInteger(I)));
+    return;
+  }
+
+  if (const auto *CI = dyn_cast<ConstantInt>(C)) {
+    appendMcasmInitAtom(Output, NeedComma, std::to_string(CI->getSExtValue()));
+    return;
+  }
+
+  if (isa<UndefValue>(C) || isa<ConstantAggregateZero>(C)) {
+    appendMcasmZeroInit(C->getType(), Output, NeedComma);
+    return;
+  }
+
+  if (const auto *CA = dyn_cast<ConstantArray>(C)) {
+    for (const Use &Op : CA->operands())
+      appendMcasmInitializer(cast<Constant>(Op.get()), Output, NeedComma);
+    return;
+  }
+
+  if (const auto *CS = dyn_cast<ConstantStruct>(C)) {
+    for (const Use &Op : CS->operands())
+      appendMcasmInitializer(cast<Constant>(Op.get()), Output, NeedComma);
+    return;
+  }
+
+  if (const auto *CV = dyn_cast<ConstantVector>(C)) {
+    for (const Use &Op : CV->operands())
+      appendMcasmInitializer(cast<Constant>(Op.get()), Output, NeedComma);
+    return;
+  }
+
+  appendMcasmZeroInit(C->getType(), Output, NeedComma);
+}
 McasmAsmPrinter::McasmAsmPrinter(TargetMachine &TM,
                                  std::unique_ptr<MCStreamer> Streamer)
     : AsmPrinter(TM, std::move(Streamer)), Subtarget(nullptr) {
@@ -617,43 +685,8 @@ void McasmAsmPrinter::emitGlobalVariable(const GlobalVariable *GV) {
   Output += " [";
 
   const Constant *C = GV->getInitializer();
-
-  // Emit initializer values
-  if (const ConstantDataSequential *CDS = dyn_cast<ConstantDataSequential>(C)) {
-    // Array of integers
-    for (unsigned i = 0, e = CDS->getNumElements(); i != e; ++i) {
-      if (i > 0) Output += ", ";
-      Output += std::to_string(CDS->getElementAsInteger(i));
-    }
-  } else if (const ConstantInt *CI = dyn_cast<ConstantInt>(C)) {
-    // Single integer
-    Output += std::to_string(CI->getSExtValue());
-  } else if (const ConstantAggregateZero *CAZ = dyn_cast<ConstantAggregateZero>(C)) {
-    // Zero initializer
-    Type *Ty = CAZ->getType();
-    if (ArrayType *ATy = dyn_cast<ArrayType>(Ty)) {
-      unsigned NumElems = ATy->getNumElements();
-      for (unsigned i = 0; i < NumElems; ++i) {
-        if (i > 0) Output += ", ";
-        Output += "0";
-      }
-    } else {
-      Output += "0";
-    }
-  } else if (const ConstantArray *CA = dyn_cast<ConstantArray>(C)) {
-    // Array of constants
-    for (unsigned i = 0, e = CA->getNumOperands(); i != e; ++i) {
-      if (i > 0) Output += ", ";
-      if (const ConstantInt *CI = dyn_cast<ConstantInt>(CA->getOperand(i))) {
-        Output += std::to_string(CI->getSExtValue());
-      } else {
-        Output += "0"; // Fallback for non-integer elements
-      }
-    }
-  } else {
-    // Unknown initializer type, emit zero
-    Output += "0";
-  }
+  bool NeedComma = false;
+  appendMcasmInitializer(C, Output, NeedComma);
 
   Output += "]";
   OutStreamer->emitRawText(Output);
