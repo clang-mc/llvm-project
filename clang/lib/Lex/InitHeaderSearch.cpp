@@ -39,6 +39,16 @@ static SmallString<128> getClangSiblingIncludeDir(StringRef ResourceDir) {
   return P;
 }
 
+static SmallString<128> getClangSiblingLibcIncludeDir(StringRef ResourceDir) {
+  SmallString<128> P(ResourceDir);
+  // ResourceDir is expected to be <install>/lib/clang/<version>.
+  // Convert it to <install>/libc/include, i.e. %path_to_clang%/../libc/include.
+  for (int I = 0; I < 3; ++I)
+    llvm::sys::path::remove_filename(P);
+  llvm::sys::path::append(P, "libc", "include");
+  return P;
+}
+
 /// Holds information about a single DirectoryLookup object.
 struct DirectoryLookupInfo {
   IncludeDirGroup Group;
@@ -197,6 +207,8 @@ void InitHeaderSearch::AddDefaultCIncludePaths(const llvm::Triple &triple,
     // include location instead of <resource>/include.
     SmallString<128> P = getClangSiblingIncludeDir(HSOpts.ResourceDir);
     AddUnmappedPath(P, ExternCSystem, false);
+    SmallString<128> LibcP = getClangSiblingLibcIncludeDir(HSOpts.ResourceDir);
+    AddUnmappedPath(LibcP, ExternCSystem, false);
   }
 
   // All remaining additions are for system include directories, early exit if
