@@ -1908,6 +1908,10 @@ bool CompilerInvocation::ParseCodeGenArgs(CodeGenOptions &Opts, ArgList &Args,
     Opts.CoveragePrefixMap.emplace_back(Split.first, Split.second);
   }
 
+  Opts.McasmNoStdLibInclude = Args.hasArg(OPT_fmcasm_no_ll_libc);
+  Opts.McasmAnonymizeStaticData =
+      Args.hasArg(OPT_fmcasm_anonymize_static_data);
+
   const llvm::Triple::ArchType DebugEntryValueArchs[] = {
       llvm::Triple::x86,     llvm::Triple::x86_64, llvm::Triple::aarch64,
       llvm::Triple::arm,     llvm::Triple::armeb,  llvm::Triple::mips,

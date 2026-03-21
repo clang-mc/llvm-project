@@ -324,6 +324,7 @@ static void appendMcasmInitializer(const Constant *C, std::string &Output,
 
   appendMcasmZeroInit(C->getType(), Output, NeedComma);
 }
+
 McasmAsmPrinter::McasmAsmPrinter(TargetMachine &TM,
                                  std::unique_ptr<MCStreamer> Streamer)
     : AsmPrinter(TM, std::move(Streamer)), Subtarget(nullptr) {
@@ -334,6 +335,13 @@ void McasmAsmPrinter::emitStartOfAsmFile(Module &M) {
   MCASM_DEBUG_LOG("DEBUG: McasmAsmPrinter::emitStartOfAsmFile called\n");
   // mcasm requires #include "_ll_std" at the start of every file
   OutStreamer->emitRawText("#include \"_ll_std\"");
+  if (M.getModuleFlag("mcasm-libc-include"))
+    OutStreamer->emitRawText("#include \"_ll_libc\"");
+  bool HasMainDefinition = llvm::any_of(M, [](const Function &F) {
+    return !F.isDeclaration() && F.getName() == "main";
+  });
+  if (HasMainDefinition)
+    OutStreamer->emitRawText("#include \"_ll_crt\"");
   OutStreamer->emitRawText("");  // Blank line
 
   // mcasm has no native symbol alias syntax (e.g. "a = b").
@@ -666,18 +674,16 @@ void McasmAsmPrinter::emitGlobalVariable(const GlobalVariable *GV) {
   // mcasm syntax: static varname [val1, val2, ...]
   std::string Output = "static ";
 
-  // Get the variable name and sanitize it for mcasm
-  std::string VarName = GV->getName().str();
-
-  // Remove leading dot if present (e.g., .str -> str)
-  if (!VarName.empty() && VarName[0] == '.') {
-    VarName = VarName.substr(1);
-  }
-
-  // Replace remaining dots with underscores (e.g., str.1 -> str_1)
-  for (char &C : VarName) {
-    if (C == '.') {
-      C = '_';
+  std::string VarName;
+  if (shouldAnonymizeMcasmStaticData(GV))
+    VarName = getSymbol(GV)->getName().str();
+  else {
+    VarName = GV->getName().str();
+    if (!VarName.empty() && VarName[0] == '.')
+      VarName.erase(0, 1);
+    for (char &C : VarName) {
+      if (C == '.')
+        C = '_';
     }
   }
 

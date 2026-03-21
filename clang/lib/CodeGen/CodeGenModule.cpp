@@ -1481,6 +1481,13 @@ void CodeGenModule::Release() {
     getModule().addModuleFlag(llvm::Module::Warning, "import-call-optimization",
                               1);
 
+  if (T.getArch() == llvm::Triple::mcasm && !CodeGenOpts.McasmNoStdLibInclude)
+    getModule().addModuleFlag(llvm::Module::Override, "mcasm-libc-include", 1);
+  if (T.getArch() == llvm::Triple::mcasm &&
+      CodeGenOpts.McasmAnonymizeStaticData)
+    getModule().addModuleFlag(llvm::Module::Override,
+                              "mcasm-anonymize-static-data", 1);
+
   // Enable unwind v2 (epilog).
   if (CodeGenOpts.getWinX64EHUnwindV2() != llvm::WinX64EHUnwindV2Mode::Disabled)
     getModule().addModuleFlag(

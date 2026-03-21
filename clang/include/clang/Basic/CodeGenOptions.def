@@ -494,6 +494,10 @@ CODEGENOPT(CtorDtorReturnThis, 1, 0, Benign)
 /// by the Windows kernel to enable import call optimization.
 CODEGENOPT(ImportCallOptimization, 1, 0, Benign)
 
+/// Suppress automatic #include "_ll_libc" emission in mcasm output.
+CODEGENOPT(McasmNoStdLibInclude, 1, 0, Benign)
+CODEGENOPT(McasmAnonymizeStaticData, 1, 0, Benign)
+
 /// Controls whether we generate code for static linking of libclosure
 /// (BlocksRuntime) on Windows.
 CODEGENOPT(StaticClosure, 1, 0, Benign)

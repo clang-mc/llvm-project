@@ -87,6 +87,8 @@ const char *types::getTypeTempSuffix(ID Id, bool CLStyle) {
       return "exe";
     case TY_PP_Asm:
       return "asm";
+    case TY_McAsm:
+      return "mcasm";
     default:
       break;
     }
@@ -369,6 +371,7 @@ types::ID types::lookupTypeForExtension(llvm::StringRef Ext) {
       .Case("mii", TY_PP_ObjCXX)
       .Case("obj", TY_Object)
       .Case("ifs", TY_IFS)
+      .Case("mcasm", TY_McAsm)
       .Case("pch", TY_PCH)
       .Case("pcm", TY_ModuleFile)
       .Case("c++m", TY_CXXModule)

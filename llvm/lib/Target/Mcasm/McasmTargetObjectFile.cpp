@@ -12,13 +12,24 @@
 //===----------------------------------------------------------------------===//
 
 #include "McasmTargetObjectFile.h"
+#include "llvm/ADT/SmallString.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalValue.h"
 #include "llvm/IR/Mangler.h"
+#include "llvm/IR/Metadata.h"
+#include "llvm/IR/Module.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCSymbol.h"
+#include "llvm/Support/CommandLine.h"
+#include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/RandomNumberGenerator.h"
+#include <array>
 
 using namespace llvm;
+
+static cl::opt<bool> McasmAnonymizeStaticData(
+    "mcasm-anonymize-static-data", cl::Hidden, cl::init(false),
+    cl::desc("Rewrite mcasm static-data symbol names to randomized identifiers"));
 
 std::string llvm::rewriteMcasmSharedName(StringRef Name) {
   static constexpr char HexDigits[] = "0123456789abcdef";
@@ -43,6 +54,49 @@ std::string llvm::rewriteMcasmSharedName(StringRef Name) {
   return Encoded;
 }
 
+bool llvm::shouldAnonymizeMcasmStaticData(const GlobalValue *GV) {
+  if (isa<Function>(GV))
+    return false;
+  const Module *M = GV->getParent();
+  if (M) {
+    if (auto *MD =
+            cast_or_null<ConstantAsMetadata>(M->getModuleFlag("mcasm-anonymize-static-data"))) {
+      if (auto *Flag = dyn_cast<ConstantInt>(MD->getValue()))
+        return Flag->getZExtValue() != 0;
+    }
+  }
+  return McasmAnonymizeStaticData;
+}
+
+static std::string sanitizeMcasmDataSymbolName(StringRef RawName) {
+  SmallString<128> NameStr;
+  if (!RawName.empty() && RawName[0] == '.')
+    NameStr = RawName.substr(1);
+  else
+    NameStr = RawName;
+
+  for (char &C : NameStr) {
+    if (C == '.')
+      C = '_';
+  }
+  return std::string(NameStr);
+}
+
+static std::string createHiddenStaticSymbolName() {
+  static constexpr char HexDigits[] = "0123456789abcdef";
+  std::array<uint8_t, 16> UUIDBytes{};
+  if (std::error_code EC = getRandomBytes(UUIDBytes.data(), UUIDBytes.size()))
+    report_fatal_error(Twine("unable to generate mcasm static-data UUID: ") +
+                       EC.message());
+
+  SmallString<48> Name("mcasm_static_");
+  for (uint8_t Byte : UUIDBytes) {
+    Name.push_back(HexDigits[Byte >> 4]);
+    Name.push_back(HexDigits[Byte & 0x0f]);
+  }
+  return std::string(Name);
+}
+
 MCSymbol *McasmTargetObjectFile::getTargetSymbol(const GlobalValue *GV,
                                                   const TargetMachine &TM) const {
   SmallString<128> NameStr;
@@ -59,28 +113,16 @@ MCSymbol *McasmTargetObjectFile::getTargetSymbol(const GlobalValue *GV,
     return getContext().getOrCreateSymbol(F->getName());
   }
 
-  // For global variables (including string literals), sanitize the name
-  // Remove leading dot and replace remaining dots with underscores
-  StringRef RawName = GV->getName();
-  if (!RawName.empty() && RawName[0] == '.') {
-    // Remove leading dot (e.g., .str -> str)
-    NameStr = RawName.substr(1);
-  } else {
-    NameStr = RawName;
+  if (shouldAnonymizeMcasmStaticData(GV)) {
+    auto [It, Inserted] =
+        AnonymizedStaticSymbols.try_emplace(GV, std::string());
+    if (Inserted)
+      It->second = createHiddenStaticSymbolName();
+    return getContext().getOrCreateSymbol(It->second);
   }
 
-  // Replace remaining dots with underscores (e.g., str.1 -> str_1)
-  for (char &C : NameStr) {
-    if (C == '.') {
-      C = '_';
-    }
-  }
-
-  // If we modified the name, return the sanitized symbol
-  if (NameStr != RawName) {
+  NameStr = sanitizeMcasmDataSymbolName(GV->getName());
+  if (NameStr != GV->getName())
     return getContext().getOrCreateSymbol(NameStr);
-  }
-
-  // For other cases, return nullptr to use default behavior
   return nullptr;
 }

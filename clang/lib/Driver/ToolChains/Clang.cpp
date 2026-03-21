@@ -5213,7 +5213,8 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
       CmdArgs.push_back("-emit-interface-stubs");
       CmdArgs.push_back(
           Args.MakeArgString(Twine("-interface-stub-version=") + ArgStr.str()));
-    } else if (JA.getType() == types::TY_PP_Asm) {
+    } else if (JA.getType() == types::TY_PP_Asm ||
+               JA.getType() == types::TY_McAsm) {
       CmdArgs.push_back("-S");
     } else if (JA.getType() == types::TY_AST) {
       if (!Args.hasArg(options::OPT_ignore_pch))
@@ -5231,7 +5232,9 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
     } else if (JA.getType() == types::TY_Image && IsAMDSPIRVForHIPDevice) {
       CmdArgs.push_back("-emit-obj");
     } else {
-      assert(JA.getType() == types::TY_PP_Asm && "Unexpected output type!");
+      assert((JA.getType() == types::TY_PP_Asm ||
+              JA.getType() == types::TY_McAsm) &&
+             "Unexpected output type!");
     }
 
     // Preserve use-list order by default when emitting bitcode, so that
@@ -5456,6 +5459,13 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
   // -save-temps.
   CmdArgs.push_back("-main-file-name");
   CmdArgs.push_back(getBaseInputName(Args, Input));
+
+  if (Triple.getArch() == llvm::Triple::mcasm &&
+      Args.hasArg(options::OPT_nostdlib))
+    CmdArgs.push_back("-fmcasm-no-ll-libc");
+  if (Triple.getArch() == llvm::Triple::mcasm &&
+      Args.hasArg(options::OPT_fmcasm_anonymize_static_data))
+    CmdArgs.push_back("-fmcasm-anonymize-static-data");
 
   // Some flags which affect the language (via preprocessor
   // defines).

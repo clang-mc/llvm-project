@@ -163,4 +163,4 @@ main:
   ret i32 %r
 }
 
-attributes #0 = { noinline nounwind optnone memory(none) mustprogress nofree norecurse nosync willreturn }
+attributes #0 = { noinline nounwind memory(none) mustprogress nofree norecurse nosync willreturn }

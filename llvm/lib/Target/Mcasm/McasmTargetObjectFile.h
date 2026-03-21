@@ -14,16 +14,19 @@
 #ifndef LLVM_LIB_TARGET_MCASM_MCASMTARGETOBJECTFILE_H
 #define LLVM_LIB_TARGET_MCASM_MCASMTARGETOBJECTFILE_H
 
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/CodeGen/TargetLoweringObjectFileImpl.h"
 #include <string>
 
 namespace llvm {
 
 class StringRef;
+class GlobalValue;
 
 /// Encode a shared mcasm symbol suffix into the restricted character set used
 /// after `_ll_shared:`.
 std::string rewriteMcasmSharedName(StringRef Name);
+bool shouldAnonymizeMcasmStaticData(const GlobalValue *GV);
 
 // Use ELF as base since mcasm primarily targets ELF-like output
 class McasmTargetObjectFile : public TargetLoweringObjectFileELF {
@@ -34,6 +37,9 @@ public:
   /// Override to customize symbol names for mcasm format
   MCSymbol *getTargetSymbol(const GlobalValue *GV,
                             const TargetMachine &TM) const override;
+
+private:
+  mutable DenseMap<const GlobalValue *, std::string> AnonymizedStaticSymbols;
 };
 
 } // end namespace llvm

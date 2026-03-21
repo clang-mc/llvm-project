@@ -35,6 +35,7 @@
 #include "ToolChains/MSP430.h"
 #include "ToolChains/MSVC.h"
 #include "ToolChains/Managarm.h"
+#include "ToolChains/Mcasm.h"
 #include "ToolChains/MinGW.h"
 #include "ToolChains/MipsLinux.h"
 #include "ToolChains/NetBSD.h"
@@ -5131,7 +5132,8 @@ Action *Driver::ConstructPhaseAction(
   // Some types skip the assembler phase (e.g., llvm-bc), but we can't
   // encode this in the steps because the intermediate type depends on
   // arguments. Just special case here.
-  if (Phase == phases::Assemble && Input->getType() != types::TY_PP_Asm)
+  if (Phase == phases::Assemble && Input->getType() != types::TY_PP_Asm &&
+      Input->getType() != types::TY_McAsm)
     return Input;
 
   // Use of --sycl-link will only allow for the link phase to occur. This is
@@ -5326,9 +5328,13 @@ Action *Driver::ConstructPhaseAction(
     if (UseSPIRVBackendForHipDeviceOnlyNoRDC && !Args.hasArg(options::OPT_S))
       return C.MakeAction<BackendJobAction>(Input, types::TY_Image);
 
+    if (DefaultToolChainTriple.getArch() == llvm::Triple::mcasm)
+      return C.MakeAction<BackendJobAction>(Input, types::TY_McAsm);
     return C.MakeAction<BackendJobAction>(Input, types::TY_PP_Asm);
   }
   case phases::Assemble:
+    if (Input->getType() == types::TY_McAsm)
+      return Input;
     return C.MakeAction<AssembleJobAction>(std::move(Input), types::TY_Object);
   }
 
@@ -6212,6 +6218,8 @@ InputInfoList Driver::BuildJobsForActionNoCache(
 
 const char *Driver::getDefaultImageName() const {
   llvm::Triple Target(llvm::Triple::normalize(TargetTriple));
+  if (Target.getArch() == llvm::Triple::mcasm)
+    return "a.zip";
   return Target.isOSWindows() ? "a.exe" : "a.out";
 }
 
@@ -6331,8 +6339,16 @@ const char *Driver::GetNamedOutputPath(Compilation &C, const JobAction &JA,
   llvm::PrettyStackTraceString CrashInfo("Computing output path");
   // Output to a user requested destination?
   if (AtTopLevel && !isa<DsymutilJobAction>(JA) && !isa<VerifyJobAction>(JA)) {
-    if (Arg *FinalOutput = C.getArgs().getLastArg(options::OPT_o))
+    if (Arg *FinalOutput = C.getArgs().getLastArg(options::OPT_o)) {
+      if (JA.getType() == types::TY_Image &&
+          C.getDefaultToolChain().getTriple().getArch() == llvm::Triple::mcasm) {
+        SmallString<128> Output(FinalOutput->getValue());
+        if (!StringRef(Output).ends_with_insensitive(".zip"))
+          Output += ".zip";
+        return C.addResultFile(C.getArgs().MakeArgString(Output), &JA);
+      }
       return C.addResultFile(FinalOutput->getValue(), &JA);
+    }
   }
 
   // For /P, preprocess to file named after BaseInput.
@@ -7083,6 +7099,9 @@ const ToolChain &Driver::getToolChain(const ArgList &Args,
       case llvm::Triple::spirv32:
       case llvm::Triple::spirv64:
         TC = std::make_unique<toolchains::SPIRVToolChain>(*this, Target, Args);
+        break;
+      case llvm::Triple::mcasm:
+        TC = std::make_unique<toolchains::Mcasm>(*this, Target, Args);
         break;
       case llvm::Triple::csky:
         TC = std::make_unique<toolchains::CSKYToolChain>(*this, Target, Args);

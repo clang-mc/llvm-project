@@ -970,6 +970,10 @@ def Xclangas : Separate<["-"], "Xclangas">,
   HelpText<"Pass <arg> to clang -cc1as">, MetaVarName<"<arg>">,
   Flags<[NoXarchOption]>, Visibility<[ClangOption, CLOption, DXCOption]>,
   Group<CompileOnly_Group>;
+def Xclang_mc : Separate<["-"], "Xclang-mc">,
+  HelpText<"Pass <arg> to clang-mc">, MetaVarName<"<arg>">,
+  Flags<[NoXarchOption]>, Visibility<[ClangOption]>,
+  Group<CompileOnly_Group>;
 def : Joined<["-"], "Xclang=">, Group<CompileOnly_Group>,
   Flags<[NoXarchOption]>, Visibility<[ClangOption, CLOption, DXCOption]>,
   Alias<Xclang>,
@@ -978,6 +982,10 @@ def : Joined<["-"], "Xclangas=">, Group<CompileOnly_Group>,
   Flags<[NoXarchOption]>, Visibility<[ClangOption, CLOption, DXCOption]>,
   Alias<Xclangas>,
   HelpText<"Alias for -Xclangas">, MetaVarName<"<arg>">;
+def : Joined<["-"], "Xclang-mc=">, Group<CompileOnly_Group>,
+  Flags<[NoXarchOption]>, Visibility<[ClangOption]>,
+  Alias<Xclang_mc>,
+  HelpText<"Alias for -Xclang-mc">, MetaVarName<"<arg>">;
 def Xcuda_fatbinary : Separate<["-"], "Xcuda-fatbinary">,
   HelpText<"Pass <arg> to fatbinary invocation">, MetaVarName<"<arg>">;
 def Xcuda_ptxas : Separate<["-"], "Xcuda-ptxas">,
@@ -6422,6 +6430,10 @@ def save_temps : Flag<["-", "--"], "save-temps">, Flags<[NoXarchOption]>,
   Visibility<[ClangOption, FlangOption, FC1Option]>,
   Alias<save_temps_EQ>, AliasArgs<["cwd"]>,
   HelpText<"Alias for --save-temps=cwd">;
+def fmcasm_no_ll_libc : Flag<["-"], "fmcasm-no-ll-libc">,
+  Flags<[HelpHidden]>, Visibility<[CC1Option]>;
+def fmcasm_anonymize_static_data : Flag<["-"], "fmcasm-anonymize-static-data">,
+  Flags<[HelpHidden]>, Visibility<[ClangOption, CC1Option]>;
 def save_stats_EQ : Joined<["-", "--"], "save-stats=">, Flags<[NoXarchOption]>,
   HelpText<"Save llvm statistics.">;
 def save_stats : Flag<["-", "--"], "save-stats">, Flags<[NoXarchOption]>,

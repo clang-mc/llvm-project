@@ -17,6 +17,7 @@ u32 __bit_and(u32 a, u32 b) {
   u32 result = 0u;
   u32 p = 1u;
   int i;
+#pragma clang loop unroll(full)
   for (i = 0; i < 32; i++) {
     u32 ai = (a / p) % 2u;
     u32 bi = (b / p) % 2u;
