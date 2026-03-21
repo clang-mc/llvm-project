@@ -264,65 +264,108 @@ static void appendMcasmInitAtom(std::string &Output, bool &NeedComma,
   NeedComma = true;
 }
 
-static void appendMcasmZeroInit(Type *Ty, std::string &Output, bool &NeedComma) {
+static void appendMcasmInitWord(std::string &Output, bool &NeedComma,
+                                uint32_t Word) {
+  appendMcasmInitAtom(Output, NeedComma,
+                      std::to_string(static_cast<int32_t>(Word)));
+}
+
+static void appendMcasmInitBits(const APInt &Bits, uint64_t StorageBits,
+                                std::string &Output, bool &NeedComma) {
+  unsigned NumWords = std::max<uint64_t>(1, divideCeil(StorageBits, 32ULL));
+  APInt Padded = Bits.zextOrTrunc(NumWords * 32);
+  for (unsigned I = 0; I != NumWords; ++I) {
+    uint32_t Word = Padded.lshr(I * 32).trunc(32).getZExtValue();
+    appendMcasmInitWord(Output, NeedComma, Word);
+  }
+}
+
+static void appendMcasmZeroInit(Type *Ty, const DataLayout &DL,
+                                std::string &Output, bool &NeedComma) {
   if (auto *ATy = dyn_cast<ArrayType>(Ty)) {
     for (uint64_t I = 0, E = ATy->getNumElements(); I != E; ++I)
-      appendMcasmZeroInit(ATy->getElementType(), Output, NeedComma);
+      appendMcasmZeroInit(ATy->getElementType(), DL, Output, NeedComma);
     return;
   }
 
   if (auto *STy = dyn_cast<StructType>(Ty)) {
     for (Type *EltTy : STy->elements())
-      appendMcasmZeroInit(EltTy, Output, NeedComma);
+      appendMcasmZeroInit(EltTy, DL, Output, NeedComma);
     return;
   }
 
-  appendMcasmInitAtom(Output, NeedComma, "0");
+  if (auto *VTy = dyn_cast<VectorType>(Ty)) {
+    Type *EltTy = VTy->getElementType();
+    ElementCount EC = VTy->getElementCount();
+    assert(EC.isScalar() && "mcasm global init does not support scalable vectors");
+    for (unsigned I = 0, E = EC.getKnownMinValue(); I != E; ++I)
+      appendMcasmZeroInit(EltTy, DL, Output, NeedComma);
+    return;
+  }
+
+  unsigned NumWords =
+      std::max<uint64_t>(1, divideCeil(DL.getTypeStoreSizeInBits(Ty), 32ULL));
+  for (unsigned I = 0; I != NumWords; ++I)
+    appendMcasmInitAtom(Output, NeedComma, "0");
 }
 
-static void appendMcasmInitializer(const Constant *C, std::string &Output,
-                                   bool &NeedComma) {
+static void appendMcasmInitializer(const Constant *C, const DataLayout &DL,
+                                   std::string &Output, bool &NeedComma) {
   if (C->isNullValue()) {
-    appendMcasmZeroInit(C->getType(), Output, NeedComma);
+    appendMcasmZeroInit(C->getType(), DL, Output, NeedComma);
     return;
   }
 
   if (const auto *CDS = dyn_cast<ConstantDataSequential>(C)) {
     for (unsigned I = 0, E = CDS->getNumElements(); I != E; ++I)
-      appendMcasmInitAtom(Output, NeedComma,
-                          std::to_string(CDS->getElementAsInteger(I)));
+      appendMcasmInitializer(CDS->getElementAsConstant(I), DL, Output,
+                             NeedComma);
     return;
   }
 
   if (const auto *CI = dyn_cast<ConstantInt>(C)) {
-    appendMcasmInitAtom(Output, NeedComma, std::to_string(CI->getSExtValue()));
+    unsigned BitWidth = CI->getBitWidth();
+    if (BitWidth <= 32) {
+      appendMcasmInitAtom(Output, NeedComma,
+                          std::to_string(CI->getSExtValue()));
+      return;
+    }
+    appendMcasmInitBits(CI->getValue(), DL.getTypeStoreSizeInBits(CI->getType()),
+                        Output, NeedComma);
+    return;
+  }
+
+  if (const auto *CFP = dyn_cast<ConstantFP>(C)) {
+    appendMcasmInitBits(CFP->getValueAPF().bitcastToAPInt(),
+                        DL.getTypeStoreSizeInBits(CFP->getType()), Output,
+                        NeedComma);
     return;
   }
 
   if (isa<UndefValue>(C) || isa<ConstantAggregateZero>(C)) {
-    appendMcasmZeroInit(C->getType(), Output, NeedComma);
+    appendMcasmZeroInit(C->getType(), DL, Output, NeedComma);
     return;
   }
 
   if (const auto *CA = dyn_cast<ConstantArray>(C)) {
     for (const Use &Op : CA->operands())
-      appendMcasmInitializer(cast<Constant>(Op.get()), Output, NeedComma);
+      appendMcasmInitializer(cast<Constant>(Op.get()), DL, Output, NeedComma);
     return;
   }
 
   if (const auto *CS = dyn_cast<ConstantStruct>(C)) {
     for (const Use &Op : CS->operands())
-      appendMcasmInitializer(cast<Constant>(Op.get()), Output, NeedComma);
+      appendMcasmInitializer(cast<Constant>(Op.get()), DL, Output, NeedComma);
     return;
   }
 
   if (const auto *CV = dyn_cast<ConstantVector>(C)) {
     for (const Use &Op : CV->operands())
-      appendMcasmInitializer(cast<Constant>(Op.get()), Output, NeedComma);
+      appendMcasmInitializer(cast<Constant>(Op.get()), DL, Output, NeedComma);
     return;
   }
 
-  appendMcasmZeroInit(C->getType(), Output, NeedComma);
+  appendMcasmZeroInit(C->getType(), DL, Output, NeedComma);
 }
 
 McasmAsmPrinter::McasmAsmPrinter(TargetMachine &TM,
@@ -692,7 +735,8 @@ void McasmAsmPrinter::emitGlobalVariable(const GlobalVariable *GV) {
 
   const Constant *C = GV->getInitializer();
   bool NeedComma = false;
-  appendMcasmInitializer(C, Output, NeedComma);
+  appendMcasmInitializer(C, GV->getParent()->getDataLayout(), Output,
+                         NeedComma);
 
   Output += "]";
   OutStreamer->emitRawText(Output);
