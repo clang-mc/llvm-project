@@ -36,7 +36,8 @@ static MachineInstrBuilder &addFrameReference(MachineInstrBuilder &MIB,
                                                 int FI, int Offset = 0);
 
 McasmInstrInfo::McasmInstrInfo(const McasmSubtarget &STI)
-    : McasmGenInstrInfo(STI, RI, -1, -1, -1, -1),
+    : McasmGenInstrInfo(STI, RI, Mcasm::ADJCALLSTACKDOWN32,
+                        Mcasm::ADJCALLSTACKUP32, -1, -1),
       RI(STI.getTargetTriple()) {  // Construct RI with Triple
   MCASM_DEBUG_LOG("DEBUG: McasmInstrInfo constructor called\n");
 }
