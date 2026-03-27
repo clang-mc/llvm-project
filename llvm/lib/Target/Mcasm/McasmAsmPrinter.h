@@ -19,6 +19,7 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringMap.h"
 #include "llvm/CodeGen/AsmPrinter.h"
 
 namespace llvm {
@@ -35,9 +36,11 @@ class LLVM_LIBRARY_VISIBILITY McasmAsmPrinter : public AsmPrinter {
   struct InlineAsmHelperRecord {
     std::string Label;
     std::string Body;
+    std::string Key;
   };
   DenseMap<const Function *, unsigned> InlineAsmCounter;
   SmallVector<InlineAsmHelperRecord, 16> InlineAsmHelpers;
+  StringMap<unsigned> InlineAsmHelperIndexByKey;
   SmallPtrSet<const GlobalAlias *, 16> MacroAliases;
 
 public:

@@ -37,6 +37,10 @@ public:
     // Mcasm uses 8 parameter registers (r0-r7)
     RegParmMax = 8;
 
+    // mcasm has a single inline-asm syntax, so treat {|} as ordinary
+    // characters rather than asm-variant delimiters.
+    NoAsmVariants = true;
+
     // All types are 32-bit aligned in mcasm
     MinGlobalAlign = 32;
 

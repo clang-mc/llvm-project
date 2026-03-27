@@ -200,6 +200,25 @@ static std::string replaceInlineAsmPlaceholders(
       continue;
     }
 
+    if (I + 1 < AsmStr.size()) {
+      switch (AsmStr[I + 1]) {
+      case '(':
+        Out.push_back('{');
+        I += 2;
+        continue;
+      case '|':
+        Out.push_back('|');
+        I += 2;
+        continue;
+      case ')':
+        Out.push_back('}');
+        I += 2;
+        continue;
+      default:
+        break;
+      }
+    }
+
     size_t J = I + 1;
     if (J >= AsmStr.size() || !std::isdigit(static_cast<unsigned char>(AsmStr[J]))) {
       Out.push_back('$');
@@ -376,6 +395,9 @@ McasmAsmPrinter::McasmAsmPrinter(TargetMachine &TM,
 
 void McasmAsmPrinter::emitStartOfAsmFile(Module &M) {
   MCASM_DEBUG_LOG("DEBUG: McasmAsmPrinter::emitStartOfAsmFile called\n");
+  InlineAsmHelpers.clear();
+  InlineAsmHelperIndexByKey.clear();
+  InlineAsmCounter.clear();
   // mcasm requires #include "_ll_std" at the start of every file
   OutStreamer->emitRawText("#include \"_ll_std\"");
   if (M.getModuleFlag("mcasm-libc-include"))
@@ -501,11 +523,19 @@ bool McasmAsmPrinter::emitMcasmInlineAsmWrapper(const MachineInstr *MI) {
 
   std::string HelperBody = rewriteMcasmInlineHelperBody(Replaced);
 
-  unsigned Seq = InlineAsmCounter[&F]++;
-  std::string HelperName =
-      rewriteMcasmSharedName((Twine("z/") + F.getName() + "_" + Twine(Seq)).str());
-  std::string Label = (Twine("_ll_shared:") + HelperName).str();
-  InlineAsmHelpers.push_back({Label, HelperBody});
+  StringRef HelperKey = HelperBody;
+  std::string Label;
+  auto It = InlineAsmHelperIndexByKey.find(HelperKey);
+  if (It != InlineAsmHelperIndexByKey.end()) {
+    Label = InlineAsmHelpers[It->second].Label;
+  } else {
+    unsigned Seq = InlineAsmCounter[&F]++;
+    std::string HelperName =
+        rewriteMcasmSharedName((Twine("z/") + F.getName() + "_" + Twine(Seq)).str());
+    Label = (Twine("_ll_shared:") + HelperName).str();
+    InlineAsmHelperIndexByKey[HelperBody] = InlineAsmHelpers.size();
+    InlineAsmHelpers.push_back({Label, HelperBody, HelperBody});
+  }
 
   std::string Init = "inline data modify storage std:vm s0 set value {";
   for (unsigned I = 0; I < RegInputVals.size(); ++I) {
