@@ -155,6 +155,8 @@ private:
   SDValue lowerCTPOP(SDValue Op, SelectionDAG &DAG) const;
   SDValue lowerVASTART(SDValue Op, SelectionDAG &DAG) const;
   SDValue lowerVAARG(SDValue Op, SelectionDAG &DAG) const;
+  SDValue lowerByteSemanticLoad(SDValue Op, SelectionDAG &DAG) const;
+  SDValue lowerByteSemanticStore(SDValue Op, SelectionDAG &DAG) const;
 
   // i64 support - custom lowering to libcalls
   SDValue LowerI64LibCall(SDValue Op, SelectionDAG &DAG, RTLIB::Libcall LC) const;

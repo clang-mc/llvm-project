@@ -37,28 +37,28 @@ entry:
 ; CHECK-LABEL: load_wide:
 ; CHECK: mov r0, wide
 ; CHECK: mov rax, [r0]
-; CHECK: add r0, 1
+; CHECK: add r0, 4
 ; CHECK: mov t0, [r0]
 
 ; CHECK-LABEL: load_second_wide:
 ; CHECK: mov
-; CHECK: add {{.*}}, 2
+; CHECK: add {{.*}}, 8
 ; CHECK: mov rax, [{{.*}}]
-; CHECK: add {{.*}}, 3
+; CHECK: add {{.*}}, 12
 ; CHECK: mov t0, [{{.*}}]
 
 ; CHECK-LABEL: store_second_wide:
 ; CHECK: mov
-; CHECK: add {{.*}}, 2
-; CHECK: add {{.*}}, 3
+; CHECK: add {{.*}}, 8
+; CHECK: add {{.*}}, 12
 ; CHECK: mov [{{.*}}], r1
 ; CHECK: mov [{{.*}}], r0
 
 ; CHECK-LABEL: load_mixed_wide:
 ; CHECK: mov
-; CHECK: add {{.*}}, 1
+; CHECK: add {{.*}}, 4
 ; CHECK: mov rax, [{{.*}}]
-; CHECK: add {{.*}}, 2
+; CHECK: add {{.*}}, 8
 ; CHECK: mov t0, [{{.*}}]
 
 ; CHECK: static wide [0, 16777216]

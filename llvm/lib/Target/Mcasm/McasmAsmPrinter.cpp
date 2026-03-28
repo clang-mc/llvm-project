@@ -299,92 +299,86 @@ static void appendMcasmInitBits(const APInt &Bits, uint64_t StorageBits,
   }
 }
 
-static void appendMcasmZeroInit(Type *Ty, const DataLayout &DL,
-                                std::string &Output, bool &NeedComma) {
-  if (auto *ATy = dyn_cast<ArrayType>(Ty)) {
-    for (uint64_t I = 0, E = ATy->getNumElements(); I != E; ++I)
-      appendMcasmZeroInit(ATy->getElementType(), DL, Output, NeedComma);
-    return;
-  }
-
-  if (auto *STy = dyn_cast<StructType>(Ty)) {
-    for (Type *EltTy : STy->elements())
-      appendMcasmZeroInit(EltTy, DL, Output, NeedComma);
-    return;
-  }
-
-  if (auto *VTy = dyn_cast<VectorType>(Ty)) {
-    Type *EltTy = VTy->getElementType();
-    ElementCount EC = VTy->getElementCount();
-    assert(EC.isScalar() && "mcasm global init does not support scalable vectors");
-    for (unsigned I = 0, E = EC.getKnownMinValue(); I != E; ++I)
-      appendMcasmZeroInit(EltTy, DL, Output, NeedComma);
-    return;
-  }
-
-  unsigned NumWords =
-      std::max<uint64_t>(1, divideCeil(DL.getTypeStoreSizeInBits(Ty), 32ULL));
-  for (unsigned I = 0; I != NumWords; ++I)
-    appendMcasmInitAtom(Output, NeedComma, "0");
+static void appendZeroBytes(SmallVectorImpl<uint8_t> &Bytes, uint64_t Count) {
+  Bytes.append(Count, 0);
 }
 
-static void appendMcasmInitializer(const Constant *C, const DataLayout &DL,
-                                   std::string &Output, bool &NeedComma) {
-  if (C->isNullValue()) {
-    appendMcasmZeroInit(C->getType(), DL, Output, NeedComma);
+static void appendBitsAsBytes(const APInt &Bits, uint64_t StorageBits,
+                              SmallVectorImpl<uint8_t> &Bytes) {
+  uint64_t NumBytes = std::max<uint64_t>(1, divideCeil(StorageBits, 8ULL));
+  APInt Padded = Bits.zextOrTrunc(NumBytes * 8);
+  for (uint64_t I = 0; I != NumBytes; ++I)
+    Bytes.push_back(Padded.lshr(I * 8).trunc(8).getZExtValue());
+}
+
+static void serializeMcasmInitializer(const Constant *C, const DataLayout &DL,
+                                      SmallVectorImpl<uint8_t> &Bytes) {
+  Type *Ty = C->getType();
+
+  if (isa<UndefValue>(C) || isa<ConstantAggregateZero>(C) || C->isNullValue()) {
+    appendZeroBytes(Bytes, DL.getTypeAllocSize(Ty).getFixedValue());
+    return;
+  }
+
+  if (const auto *CI = dyn_cast<ConstantInt>(C)) {
+    appendBitsAsBytes(CI->getValue(), DL.getTypeStoreSizeInBits(Ty), Bytes);
+    return;
+  }
+
+  if (const auto *CFP = dyn_cast<ConstantFP>(C)) {
+    appendBitsAsBytes(CFP->getValueAPF().bitcastToAPInt(),
+                      DL.getTypeStoreSizeInBits(Ty), Bytes);
     return;
   }
 
   if (const auto *CDS = dyn_cast<ConstantDataSequential>(C)) {
     for (unsigned I = 0, E = CDS->getNumElements(); I != E; ++I)
-      appendMcasmInitializer(CDS->getElementAsConstant(I), DL, Output,
-                             NeedComma);
-    return;
-  }
-
-  if (const auto *CI = dyn_cast<ConstantInt>(C)) {
-    unsigned BitWidth = CI->getBitWidth();
-    if (BitWidth <= 32) {
-      appendMcasmInitAtom(Output, NeedComma,
-                          std::to_string(CI->getSExtValue()));
-      return;
-    }
-    appendMcasmInitBits(CI->getValue(), DL.getTypeStoreSizeInBits(CI->getType()),
-                        Output, NeedComma);
-    return;
-  }
-
-  if (const auto *CFP = dyn_cast<ConstantFP>(C)) {
-    appendMcasmInitBits(CFP->getValueAPF().bitcastToAPInt(),
-                        DL.getTypeStoreSizeInBits(CFP->getType()), Output,
-                        NeedComma);
-    return;
-  }
-
-  if (isa<UndefValue>(C) || isa<ConstantAggregateZero>(C)) {
-    appendMcasmZeroInit(C->getType(), DL, Output, NeedComma);
+      serializeMcasmInitializer(CDS->getElementAsConstant(I), DL, Bytes);
     return;
   }
 
   if (const auto *CA = dyn_cast<ConstantArray>(C)) {
     for (const Use &Op : CA->operands())
-      appendMcasmInitializer(cast<Constant>(Op.get()), DL, Output, NeedComma);
+      serializeMcasmInitializer(cast<Constant>(Op.get()), DL, Bytes);
     return;
   }
 
   if (const auto *CS = dyn_cast<ConstantStruct>(C)) {
-    for (const Use &Op : CS->operands())
-      appendMcasmInitializer(cast<Constant>(Op.get()), DL, Output, NeedComma);
+    const StructLayout *SL = DL.getStructLayout(CS->getType());
+    uint64_t Start = Bytes.size();
+    appendZeroBytes(Bytes, SL->getSizeInBytes().getFixedValue());
+    for (unsigned I = 0, E = CS->getNumOperands(); I != E; ++I) {
+      SmallVector<uint8_t, 16> FieldBytes;
+      serializeMcasmInitializer(cast<Constant>(CS->getOperand(I)), DL,
+                                FieldBytes);
+      uint64_t Offset = SL->getElementOffset(I);
+      llvm::copy(FieldBytes, Bytes.begin() + Start + Offset);
+    }
     return;
   }
 
   if (const auto *CV = dyn_cast<ConstantVector>(C)) {
     for (const Use &Op : CV->operands())
-      appendMcasmInitializer(cast<Constant>(Op.get()), DL, Output, NeedComma);
+      serializeMcasmInitializer(cast<Constant>(Op.get()), DL, Bytes);
     return;
   }
 
-  appendMcasmZeroInit(C->getType(), DL, Output, NeedComma);
+  appendZeroBytes(Bytes, DL.getTypeAllocSize(Ty).getFixedValue());
+}
+
+static void appendMcasmInitializer(const Constant *C, const DataLayout &DL,
+                                   std::string &Output, bool &NeedComma) {
+  SmallVector<uint8_t, 64> Bytes;
+  serializeMcasmInitializer(C, DL, Bytes);
+  if (Bytes.empty())
+    Bytes.push_back(0);
+
+  for (size_t I = 0; I < Bytes.size(); I += 4) {
+    uint32_t Word = 0;
+    for (unsigned Byte = 0; Byte != 4 && I + Byte < Bytes.size(); ++Byte)
+      Word |= static_cast<uint32_t>(Bytes[I + Byte]) << (Byte * 8);
+    appendMcasmInitWord(Output, NeedComma, Word);
+  }
 }
 
 McasmAsmPrinter::McasmAsmPrinter(TargetMachine &TM,

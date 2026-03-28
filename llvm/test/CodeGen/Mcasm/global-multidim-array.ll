@@ -13,5 +13,5 @@ entry:
 
 ; CHECK: static and4 [1, 2, 3]
 ; CHECK: static zeros [0, 0, 0, 0]
-; CHECK: static nested [7, 8, 9, 10, 11]
-; CHECK: static undefs [0, 0, 0, 0]
+; CHECK: static nested [524295, 9, 10, 11]
+; CHECK: static undefs [0]

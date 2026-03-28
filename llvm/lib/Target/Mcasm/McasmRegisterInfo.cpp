@@ -90,13 +90,11 @@ bool McasmRegisterInfo::eliminateFrameIndex(MachineBasicBlock::iterator II,
     MCASM_DEBUG_LOG("\n");
   }
 
-  // Get the frame index reference (in mcasm units)
+  // Get the frame index reference in byte units.
   Register FrameReg;
   StackOffset Offset = TFI->getFrameIndexReference(MF, FrameIndex, FrameReg);
 
-  // CRITICAL: Offset is already in mcasm units from getFrameIndexReference
-  // mcasm uses 4-byte units: [rsp+1] means 4 bytes offset
-  int64_t McasmOffset = Offset.getFixed();
+  int64_t ByteOffset = Offset.getFixed();
 
   // Check if this is an ALU instruction (like ADD) with FrameIndex as source
   // Memory operands have format: [BaseReg + Scale*IndexReg + Disp + Segment]
@@ -134,14 +132,18 @@ bool McasmRegisterInfo::eliminateFrameIndex(MachineBasicBlock::iterator II,
     // Adjust the immediate by McasmOffset
     if (FIOperandNum + 1 < NumOperands && MI.getOperand(FIOperandNum + 1).isImm()) {
       int64_t OldImm = MI.getOperand(FIOperandNum + 1).getImm();
-      MI.getOperand(FIOperandNum + 1).setImm(OldImm + McasmOffset);
+      MI.getOperand(FIOperandNum + 1).setImm(OldImm + ByteOffset);
       MCASM_DEBUG_LOG("DEBUG eliminateFrameIndex: Adjusted immediate from %lld to %lld\n",
-              (long long)OldImm, (long long)(OldImm + McasmOffset));
+              (long long)OldImm, (long long)(OldImm + ByteOffset));
     }
 
     MCASM_DEBUG_LOG("DEBUG eliminateFrameIndex: ALU case completed\n");
     return false;
   }
+
+  int64_t McasmOffset = ByteOffset / 4;
+  assert(ByteOffset % 4 == 0 &&
+         "byte-semantic frame offset reached direct word memory operand");
 
   // Normal memory operand case
   // Replace FrameIndex with FrameReg + McasmOffset

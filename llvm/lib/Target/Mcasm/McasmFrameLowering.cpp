@@ -60,8 +60,7 @@ StackOffset McasmFrameLowering::getFrameIndexReference(
   FrameReg = Mcasm::rsp;
   const MachineFrameInfo &MFI = MF.getFrameInfo();
   int64_t ByteOffset = MFI.getObjectOffset(FI);
-  // Convert byte offset to mcasm units (divide by 4)
-  return StackOffset::getFixed(ByteOffset / 4);
+  return StackOffset::getFixed(ByteOffset);
 }
 
 MachineBasicBlock::iterator McasmFrameLowering::eliminateCallFramePseudoInstr(

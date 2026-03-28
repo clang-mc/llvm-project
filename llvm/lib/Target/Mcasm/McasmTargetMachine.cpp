@@ -90,7 +90,7 @@ McasmTargetMachine::McasmTargetMachine(const Target &T, const Triple &TT,
                                        std::optional<CodeModel::Model> CM,
                                        CodeGenOptLevel OL, bool JIT)
     : CodeGenTargetMachineImpl(T,
-                               "e-p:32:32-i8:32-i16:32-i32:32-i64:32-f32:32-f64:32-a:0:32-n32",
+                               "e-p:32:32-i8:8:8-i16:16:16-i32:32:32-i64:32-f32:32-f64:32-a:0:32-n32",
                                TT, CPU, FS, Options,
                                RM.value_or(Reloc::Static),
                                CM.value_or(CodeModel::Small), OL),

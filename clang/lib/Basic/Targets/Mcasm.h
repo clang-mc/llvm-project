@@ -29,10 +29,10 @@ class LLVM_LIBRARY_VISIBILITY McasmTargetInfo : public TargetInfo {
 public:
   McasmTargetInfo(const llvm::Triple &Triple, const TargetOptions &)
       : TargetInfo(Triple) {
-    // Mcasm data layout: 32-bit pointers, 32-bit (word) alignment for all types
-    // All types must be word-aligned because mcasm uses 4-byte addressing units
-    // e-p:32:32-i8:32-i16:32-i32:32-i64:32-f32:32-f64:32-a:0:32-n32
-    resetDataLayout("e-p:32:32-i8:32-i16:32-i32:32-i64:32-f32:32-f64:32-a:0:32-n32");
+    // Mcasm preserves C byte semantics in IR/object layout even though the
+    // backend can only directly issue 32-bit word memory operations.
+    // Sub-word loads/stores are lowered later as read-modify-write sequences.
+    resetDataLayout("e-p:32:32-i8:8:8-i16:16:16-i32:32:32-i64:32-f32:32-f64:32-a:0:32-n32");
 
     // Mcasm uses 8 parameter registers (r0-r7)
     RegParmMax = 8;
@@ -44,14 +44,12 @@ public:
     // All types are 32-bit aligned in mcasm
     MinGlobalAlign = 32;
 
-    // CRITICAL: mcasm only supports 32-bit memory operations
-    // Even though mcasm addresses memory in 4-byte units,
-    // CharWidth/CharAlign are managed via data layout string (i8:32)
-    // Width and Align are in BITS, not bytes!
+    // Mcasm only supports 32-bit memory operations in hardware, but the C ABI
+    // still uses standard byte-granular object layout.
     BoolWidth = 8;
-    BoolAlign = 32;
+    BoolAlign = 8;
     ShortWidth = 16;
-    ShortAlign = 32;     // Still word-aligned
+    ShortAlign = 16;
 
     // Pointer characteristics
     PointerWidth = 32;

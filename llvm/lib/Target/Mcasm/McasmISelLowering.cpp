@@ -49,6 +49,24 @@ static ISD::CondCode normalizeSameSignIntCC(ISD::CondCode CC) {
   }
 }
 
+static SDValue getAddressUnitSize(SDLoc DL, SelectionDAG &DAG, EVT PtrVT) {
+  return DAG.getConstant(4, DL, PtrVT);
+}
+
+static SDValue lowerPointerToWordAddress(SDValue Ptr, SDLoc DL,
+                                         SelectionDAG &DAG) {
+  EVT PtrVT = Ptr.getValueType();
+  return DAG.getNode(ISD::SDIV, DL, PtrVT, Ptr,
+                     getAddressUnitSize(DL, DAG, PtrVT));
+}
+
+static SDValue lowerPointerByteLane(SDValue Ptr, SDLoc DL,
+                                    SelectionDAG &DAG) {
+  EVT PtrVT = Ptr.getValueType();
+  return DAG.getNode(ISD::SREM, DL, PtrVT, Ptr,
+                     getAddressUnitSize(DL, DAG, PtrVT));
+}
+
 McasmTargetLowering::McasmTargetLowering(const McasmTargetMachine &TM,
                                          const McasmSubtarget &STI)
     : TargetLowering(TM, STI), Subtarget(STI) {
@@ -66,8 +84,8 @@ McasmTargetLowering::McasmTargetLowering(const McasmTargetMachine &TM,
   setOperationPromotedToType(ISD::LOAD, MVT::i1, MVT::i32);
   setOperationPromotedToType(ISD::STORE, MVT::i1, MVT::i32);
   // Sub-32-bit values may still appear as extloads/truncstores after type
-  // legalization (e.g. i8 spills/reloads). Lower them explicitly as i32 slot
-  // accesses because mcasm has no byte/halfword memory ops.
+  // legalization (e.g. i8 spills/reloads). Lower them explicitly as byte-
+  // aware accesses because mcasm has no byte/halfword memory ops.
   setLoadExtAction(ISD::EXTLOAD, MVT::i32, MVT::i8, Custom);
   setLoadExtAction(ISD::SEXTLOAD, MVT::i32, MVT::i8, Custom);
   setLoadExtAction(ISD::ZEXTLOAD, MVT::i32, MVT::i8, Custom);
@@ -84,12 +102,9 @@ McasmTargetLowering::McasmTargetLowering(const McasmTargetMachine &TM,
   setOperationAction(ISD::ATOMIC_LOAD, MVT::i64, Expand);
   setOperationAction(ISD::ATOMIC_STORE, MVT::i64, Expand);
 
-  // Pointer arithmetic - PTRADD must be customized for mcasm's 4-byte addressing
+  // Preserve byte-addressed C pointer semantics in SelectionDAG and only
+  // convert to word addresses at the final memory operation.
   setOperationAction(ISD::PTRADD, MVT::i32, Custom);
-
-  // CRITICAL: mcasm only supports 32-bit (4-byte) memory operations
-  // In mcasm, char, short, int all are 32-bit (defined in Clang target)
-  // So Clang will generate i32 operations directly, no need for type promotion here
 
   // Stack configuration
   setStackPointerRegisterToSaveRestore(Mcasm::rsp);
@@ -392,12 +407,15 @@ bool McasmTargetLowering::shouldPreservePtrArith(const Function &F, EVT PtrVT) c
 bool McasmTargetLowering::allowsMisalignedMemoryAccesses(
     EVT VT, unsigned AS, Align Alignment, MachineMemOperand::Flags Flags,
     unsigned *Fast) const {
-  // mcasm models scalar memory as 32-bit slots. Treat sub-32-bit integer
-  // accesses and i32 accesses as naturally supported even with low IR align.
+  // Only naturally aligned 32-bit accesses map directly to hardware. Smaller
+  // or misaligned accesses are synthesized by custom lowering.
   if (Fast)
-    *Fast = 1;
-  if (VT == MVT::i8 || VT == MVT::i16 || VT == MVT::i32)
+    *Fast = 0;
+  if (VT == MVT::i32 && Alignment >= Align(4)) {
+    if (Fast)
+      *Fast = 1;
     return true;
+  }
   return TargetLowering::allowsMisalignedMemoryAccesses(VT, AS, Alignment,
                                                         Flags, Fast);
 }
@@ -638,7 +656,7 @@ SDValue McasmTargetLowering::LowerCall(
       Register FrameReg;
       StackOffset Offset = TFI->getFrameIndexReference(MF, FI->getIndex(), FrameReg);
 
-      // Build: ADD rsp, offset (in mcasm units)
+      // Build: ADD rsp, offset in byte units.
       SDValue FrameRegNode = DAG.getRegister(FrameReg, MVT::i32);
       int64_t OffsetVal = Offset.getFixed();
       if (OffsetVal != 0) {
@@ -681,9 +699,10 @@ SDValue McasmTargetLowering::LowerCall(
     } else {
       // Stack argument
       assert(VA.isMemLoc() && "Expected memory location");
-      // CCState offsets are in bytes; mcasm addresses memory in 4-byte units.
+      // CCState stack offsets are already byte offsets and must remain so
+      // until the final direct word memory operand is formed.
       int64_t ByteOff = VA.getLocMemOffset();
-      SDValue PtrOff = DAG.getIntPtrConstant(ByteOff / ArgSlotSize, dl);
+      SDValue PtrOff = DAG.getIntPtrConstant(ByteOff, dl);
       PtrOff = DAG.getNode(ISD::ADD, dl, MVT::i32,
                            DAG.getRegister(Mcasm::rsp, MVT::i32), PtrOff);
       MemOpChains.push_back(DAG.getStore(Chain, dl, Arg, PtrOff,
@@ -900,61 +919,191 @@ const char *McasmTargetLowering::getTargetNodeName(unsigned Opcode) const {
   }
 }
 
-SDValue McasmTargetLowering::LowerOperation(SDValue Op, SelectionDAG &DAG) const {
-  switch (Op.getOpcode()) {
-  case ISD::LOAD: {
-    auto *LD = cast<LoadSDNode>(Op);
-    if (LD->getExtensionType() == ISD::NON_EXTLOAD)
-      break;
+SDValue McasmTargetLowering::lowerByteSemanticLoad(SDValue Op,
+                                                   SelectionDAG &DAG) const {
+  auto *LD = cast<LoadSDNode>(Op);
+  SDLoc DL(Op);
+  MVT VT = Op.getSimpleValueType();
+  MVT MemVT = LD->getMemoryVT().getSimpleVT();
 
-    MVT VT = Op.getSimpleValueType();
-    MVT MemVT = LD->getMemoryVT().getSimpleVT();
-    if (VT != MVT::i32 || (MemVT != MVT::i8 && MemVT != MVT::i16))
-      break;
+  if (VT != MVT::i32 || LD->getExtensionType() == ISD::NON_EXTLOAD)
+    return SDValue();
 
-    SDLoc DL(Op);
-    SDValue WideLoad = DAG.getLoad(
-        MVT::i32, DL, LD->getChain(), LD->getBasePtr(), LD->getPointerInfo(),
-        LD->getAlign(), LD->getMemOperand()->getFlags(),
-        LD->getAAInfo(), LD->getRanges());
-    SDValue Value = WideLoad;
+  if (MemVT != MVT::i8 && MemVT != MVT::i16)
+    return SDValue();
 
-    if (LD->getExtensionType() == ISD::ZEXTLOAD ||
-        LD->getExtensionType() == ISD::EXTLOAD) {
-      uint64_t Mask = (MemVT == MVT::i8) ? 0xFFu : 0xFFFFu;
-      Value = DAG.getNode(ISD::AND, DL, MVT::i32, Value,
-                          DAG.getConstant(Mask, DL, MVT::i32));
-    } else if (LD->getExtensionType() == ISD::SEXTLOAD) {
-      unsigned Shift = (MemVT == MVT::i8) ? 24u : 16u;
-      SDValue Amt = DAG.getConstant(Shift, DL, MVT::i32);
-      SDValue Shl = DAG.getNode(ISD::SHL, DL, MVT::i32, Value, Amt);
-      Value = DAG.getNode(ISD::SRA, DL, MVT::i32, Shl, Amt);
+  EVT PtrVT = LD->getBasePtr().getValueType();
+  SDValue BasePtr = LD->getBasePtr();
+  SDValue WordPtr = lowerPointerToWordAddress(BasePtr, DL, DAG);
+  SDValue Lane = lowerPointerByteLane(BasePtr, DL, DAG);
+  SDValue WideLoad = DAG.getLoad(
+      MVT::i32, DL, LD->getChain(), WordPtr, LD->getPointerInfo(), Align(4),
+      LD->getMemOperand()->getFlags(), LD->getAAInfo(), LD->getRanges());
+  SDValue Value = WideLoad;
+
+  if (MemVT == MVT::i8) {
+    SDValue ShiftAmt =
+        DAG.getNode(ISD::MUL, DL, PtrVT, Lane, DAG.getConstant(8, DL, PtrVT));
+    if (PtrVT != MVT::i32)
+      ShiftAmt = DAG.getNode(ISD::TRUNCATE, DL, MVT::i32, ShiftAmt);
+    Value = DAG.getNode(ISD::SRL, DL, MVT::i32, Value, ShiftAmt);
+    Value = DAG.getNode(ISD::AND, DL, MVT::i32, Value,
+                        DAG.getConstant(0xFF, DL, MVT::i32));
+    if (LD->getExtensionType() == ISD::SEXTLOAD) {
+      SDValue Amt = DAG.getConstant(24, DL, MVT::i32);
+      Value = DAG.getNode(ISD::SRA, DL, MVT::i32,
+                          DAG.getNode(ISD::SHL, DL, MVT::i32, Value, Amt),
+                          Amt);
     }
-
     SDValue Ops[] = {Value, WideLoad.getValue(1)};
     return DAG.getMergeValues(Ops, DL);
   }
-  case ISD::STORE: {
-    auto *ST = cast<StoreSDNode>(Op);
-    if (!ST->isTruncatingStore())
-      break;
 
-    MVT MemVT = ST->getMemoryVT().getSimpleVT();
-    if (MemVT != MVT::i8 && MemVT != MVT::i16)
-      break;
+  SDValue ShiftAmt =
+      DAG.getNode(ISD::MUL, DL, PtrVT, Lane, DAG.getConstant(8, DL, PtrVT));
+  if (PtrVT != MVT::i32)
+    ShiftAmt = DAG.getNode(ISD::TRUNCATE, DL, MVT::i32, ShiftAmt);
+  SDValue LowByte = DAG.getNode(ISD::SRL, DL, MVT::i32, Value, ShiftAmt);
+  LowByte = DAG.getNode(ISD::AND, DL, MVT::i32, LowByte,
+                        DAG.getConstant(0xFF, DL, MVT::i32));
 
-    SDLoc DL(Op);
-    SDValue Value = ST->getValue();
-    MVT ValVT = Value.getSimpleValueType();
-    if (ValVT.bitsGT(MVT::i32))
-      Value = DAG.getNode(ISD::TRUNCATE, DL, MVT::i32, Value);
-    else if (ValVT != MVT::i32)
-      Value = DAG.getNode(ISD::ZERO_EXTEND, DL, MVT::i32, Value);
+  SDValue NextPtr =
+      DAG.getNode(ISD::ADD, DL, PtrVT, BasePtr, DAG.getConstant(1, DL, PtrVT));
+  SDValue NextWordPtr = lowerPointerToWordAddress(NextPtr, DL, DAG);
+  SDValue NextLane = lowerPointerByteLane(NextPtr, DL, DAG);
+  SDValue NextLoad =
+      DAG.getLoad(MVT::i32, DL, WideLoad.getValue(1), NextWordPtr,
+                  MachinePointerInfo(), Align(4),
+                  LD->getMemOperand()->getFlags(), LD->getAAInfo(),
+                  LD->getRanges());
+  SDValue NextShiftAmt = DAG.getNode(ISD::MUL, DL, PtrVT, NextLane,
+                                     DAG.getConstant(8, DL, PtrVT));
+  if (PtrVT != MVT::i32)
+    NextShiftAmt = DAG.getNode(ISD::TRUNCATE, DL, MVT::i32, NextShiftAmt);
+  SDValue HighByte =
+      DAG.getNode(ISD::SRL, DL, MVT::i32, NextLoad, NextShiftAmt);
+  HighByte = DAG.getNode(ISD::AND, DL, MVT::i32, HighByte,
+                         DAG.getConstant(0xFF, DL, MVT::i32));
+  Value = DAG.getNode(ISD::OR, DL, MVT::i32, LowByte,
+                      DAG.getNode(ISD::SHL, DL, MVT::i32, HighByte,
+                                  DAG.getConstant(8, DL, MVT::i32)));
+  if (LD->getExtensionType() == ISD::SEXTLOAD) {
+    SDValue Amt = DAG.getConstant(16, DL, MVT::i32);
+    Value = DAG.getNode(ISD::SRA, DL, MVT::i32,
+                        DAG.getNode(ISD::SHL, DL, MVT::i32, Value, Amt), Amt);
+  }
+  SDValue Ops[] = {Value, NextLoad.getValue(1)};
+  return DAG.getMergeValues(Ops, DL);
+}
 
-    return DAG.getStore(ST->getChain(), DL, Value, ST->getBasePtr(),
-                        ST->getPointerInfo(), ST->getAlign(),
+SDValue McasmTargetLowering::lowerByteSemanticStore(SDValue Op,
+                                                    SelectionDAG &DAG) const {
+  auto *ST = cast<StoreSDNode>(Op);
+  SDLoc DL(Op);
+  MVT MemVT = ST->getMemoryVT().getSimpleVT();
+  SDValue Value = ST->getValue();
+  MVT ValVT = Value.getSimpleValueType();
+
+  if (ValVT.bitsGT(MVT::i32))
+    Value = DAG.getNode(ISD::TRUNCATE, DL, MVT::i32, Value);
+  else if (ValVT != MVT::i32)
+    Value = DAG.getNode(ISD::ZERO_EXTEND, DL, MVT::i32, Value);
+
+  EVT PtrVT = ST->getBasePtr().getValueType();
+  SDValue BasePtr = ST->getBasePtr();
+  SDValue WordPtr = lowerPointerToWordAddress(BasePtr, DL, DAG);
+
+  if (!ST->isTruncatingStore())
+    return SDValue();
+
+  if (MemVT != MVT::i8 && MemVT != MVT::i16)
+    return SDValue();
+
+  SDValue Lane = lowerPointerByteLane(BasePtr, DL, DAG);
+  SDValue OldWord =
+      DAG.getLoad(MVT::i32, DL, ST->getChain(), WordPtr, ST->getPointerInfo(),
+                  Align(4), ST->getMemOperand()->getFlags(), ST->getAAInfo());
+  SDValue ShiftAmt =
+      DAG.getNode(ISD::MUL, DL, PtrVT, Lane, DAG.getConstant(8, DL, PtrVT));
+  if (PtrVT != MVT::i32)
+    ShiftAmt = DAG.getNode(ISD::TRUNCATE, DL, MVT::i32, ShiftAmt);
+
+  if (MemVT == MVT::i8) {
+    SDValue MaskShifted = DAG.getNode(
+        ISD::SHL, DL, MVT::i32, DAG.getConstant(0xFF, DL, MVT::i32), ShiftAmt);
+    SDValue Cleared = DAG.getNode(
+        ISD::AND, DL, MVT::i32, OldWord,
+        DAG.getNode(ISD::XOR, DL, MVT::i32, MaskShifted,
+                    DAG.getConstant(-1, DL, MVT::i32)));
+    SDValue Inserted =
+        DAG.getNode(ISD::SHL, DL, MVT::i32,
+                    DAG.getNode(ISD::AND, DL, MVT::i32, Value,
+                                DAG.getConstant(0xFF, DL, MVT::i32)),
+                    ShiftAmt);
+    return DAG.getStore(ST->getChain(), DL,
+                        DAG.getNode(ISD::OR, DL, MVT::i32, Cleared, Inserted),
+                        WordPtr, ST->getPointerInfo(), Align(4),
                         ST->getMemOperand()->getFlags(), ST->getAAInfo());
   }
+
+  SDValue LowByte = DAG.getNode(ISD::AND, DL, MVT::i32, Value,
+                                DAG.getConstant(0xFF, DL, MVT::i32));
+  SDValue HighByte = DAG.getNode(ISD::AND, DL, MVT::i32,
+                                 DAG.getNode(ISD::SRL, DL, MVT::i32, Value,
+                                             DAG.getConstant(8, DL, MVT::i32)),
+                                 DAG.getConstant(0xFF, DL, MVT::i32));
+
+  SDValue LowMaskShifted = DAG.getNode(
+      ISD::SHL, DL, MVT::i32, DAG.getConstant(0xFF, DL, MVT::i32), ShiftAmt);
+  SDValue LowCleared = DAG.getNode(
+      ISD::AND, DL, MVT::i32, OldWord,
+      DAG.getNode(ISD::XOR, DL, MVT::i32, LowMaskShifted,
+                  DAG.getConstant(-1, DL, MVT::i32)));
+  SDValue LowInserted =
+      DAG.getNode(ISD::SHL, DL, MVT::i32, LowByte, ShiftAmt);
+  SDValue FirstStoreValue =
+      DAG.getNode(ISD::OR, DL, MVT::i32, LowCleared, LowInserted);
+  SDValue FirstStore =
+      DAG.getStore(ST->getChain(), DL, FirstStoreValue, WordPtr,
+                   ST->getPointerInfo(), Align(4),
+                   ST->getMemOperand()->getFlags(), ST->getAAInfo());
+
+  SDValue NextPtr =
+      DAG.getNode(ISD::ADD, DL, PtrVT, BasePtr, DAG.getConstant(1, DL, PtrVT));
+  SDValue NextWordPtr = lowerPointerToWordAddress(NextPtr, DL, DAG);
+  SDValue NextLane = lowerPointerByteLane(NextPtr, DL, DAG);
+  SDValue NextOld =
+      DAG.getLoad(MVT::i32, DL, FirstStore, NextWordPtr, MachinePointerInfo(),
+                  Align(4), ST->getMemOperand()->getFlags(), ST->getAAInfo());
+  SDValue NextShiftAmt = DAG.getNode(ISD::MUL, DL, PtrVT, NextLane,
+                                     DAG.getConstant(8, DL, PtrVT));
+  if (PtrVT != MVT::i32)
+    NextShiftAmt = DAG.getNode(ISD::TRUNCATE, DL, MVT::i32, NextShiftAmt);
+  SDValue NextMaskShifted = DAG.getNode(
+      ISD::SHL, DL, MVT::i32, DAG.getConstant(0xFF, DL, MVT::i32), NextShiftAmt);
+  SDValue NextCleared = DAG.getNode(
+      ISD::AND, DL, MVT::i32, NextOld,
+      DAG.getNode(ISD::XOR, DL, MVT::i32, NextMaskShifted,
+                  DAG.getConstant(-1, DL, MVT::i32)));
+  SDValue NextInserted =
+      DAG.getNode(ISD::SHL, DL, MVT::i32, HighByte, NextShiftAmt);
+  SDValue NextStoreValue =
+      DAG.getNode(ISD::OR, DL, MVT::i32, NextCleared, NextInserted);
+  return DAG.getStore(NextOld.getValue(1), DL, NextStoreValue, NextWordPtr,
+                      MachinePointerInfo(), Align(4),
+                      ST->getMemOperand()->getFlags(), ST->getAAInfo());
+}
+
+SDValue McasmTargetLowering::LowerOperation(SDValue Op, SelectionDAG &DAG) const {
+  switch (Op.getOpcode()) {
+  case ISD::LOAD:
+    if (SDValue V = lowerByteSemanticLoad(Op, DAG))
+      return V;
+    break;
+  case ISD::STORE:
+    if (SDValue V = lowerByteSemanticStore(Op, DAG))
+      return V;
+    break;
   case ISD::GlobalAddress:
   case ISD::GlobalTLSAddress:
     return lowerGlobalAddress(Op, DAG);
@@ -1057,14 +1206,8 @@ SDValue McasmTargetLowering::LowerOperation(SDValue Op, SelectionDAG &DAG) const
     return lowerVAARG(Op, DAG);
 
   case ISD::PTRADD: {
-    // CRITICAL: mcasm uses 4-BYTE address units, not byte addressing!
-    // LLVM's PTRADD uses byte offsets, so we must divide by 4.
-    //
-    // Example: getelementptr i32, ptr %p, i32 %idx
-    //   LLVM calculates: byte_offset = %idx * sizeof(i32) = %idx * 4
-    //   LLVM generates: PTRADD %p, byte_offset
-    //   mcasm needs: ADD %p, (byte_offset / 4) = ADD %p, %idx
-    //
+    // Preserve byte-addressed C pointer semantics in DAG. Memory operations
+    // later convert byte pointers to word addresses as needed for mcasm.
     SDLoc dl(Op);
     SDValue Ptr = Op.getOperand(0);
     SDValue ByteOffset = Op.getOperand(1);
@@ -1089,42 +1232,7 @@ SDValue McasmTargetLowering::LowerOperation(SDValue Op, SelectionDAG &DAG) const
       Ptr = Base;
     }
 
-    // Convert byte offset to mcasm address units (divide by 4)
-    SDValue McasmOffset;
-    if (ConstantSDNode *C = dyn_cast<ConstantSDNode>(ByteOffset)) {
-      // Constant case: just divide by 4
-      int64_t ByteOffsetVal = C->getSExtValue();
-      int64_t McasmOffsetVal = ByteOffsetVal / 4;
-      McasmOffset = DAG.getConstant(McasmOffsetVal, dl, MVT::i32);
-    } else if (ByteOffset.getOpcode() == ISD::SHL) {
-      // Special case: ByteOffset = index << 2
-      // This is LLVM's optimization for index * 4
-      // We can directly extract the index
-      SDValue Index = ByteOffset.getOperand(0);
-      SDValue ShiftAmount = ByteOffset.getOperand(1);
-      if (ConstantSDNode *SA = dyn_cast<ConstantSDNode>(ShiftAmount)) {
-        if (SA->getZExtValue() == 2) {
-          // Perfect: (index << 2) / 4 = index
-          McasmOffset = Index;
-        } else {
-          // Different shift amount, use division
-          SDValue Four = DAG.getConstant(4, dl, MVT::i32);
-          McasmOffset = DAG.getNode(ISD::SDIV, dl, MVT::i32, ByteOffset, Four);
-        }
-      } else {
-        // Variable shift amount, use division
-        SDValue Four = DAG.getConstant(4, dl, MVT::i32);
-        McasmOffset = DAG.getNode(ISD::SDIV, dl, MVT::i32, ByteOffset, Four);
-      }
-    } else {
-      // General case: divide by 4
-      SDValue Four = DAG.getConstant(4, dl, MVT::i32);
-      McasmOffset = DAG.getNode(ISD::SDIV, dl, MVT::i32, ByteOffset, Four);
-    }
-
-    // Generate ADD with the original pointer type
-    SDValue Result = DAG.getNode(ISD::ADD, dl, PtrVT, Ptr, McasmOffset);
-    return Result;
+    return DAG.getNode(ISD::ADD, dl, PtrVT, Ptr, ByteOffset);
   }
 
   case ISD::SIGN_EXTEND_INREG: {
@@ -1338,34 +1446,26 @@ SDValue McasmTargetLowering::lowerVAARG(SDValue Op, SelectionDAG &DAG) const {
   SDLoc DL(Node);
   EVT PtrVT = getPointerTy(DAG.getDataLayout());
 
-  constexpr uint64_t AddressUnitBytes = 4;
-  auto bytesToAddressUnits = [AddressUnitBytes](uint64_t Bytes) -> uint64_t {
-    return (Bytes + AddressUnitBytes - 1) / AddressUnitBytes;
-  };
-
   SDValue VAListLoad =
       DAG.getLoad(PtrVT, DL, Chain, VAListPtr, MachinePointerInfo(SV));
   SDValue VAList = VAListLoad;
 
   const MaybeAlign MA(Node->getConstantOperandVal(3));
   if (MA && *MA > getMinStackArgumentAlignment()) {
-    uint64_t AlignUnits = bytesToAddressUnits(MA->value());
-    if (AlignUnits == 0)
-      AlignUnits = 1;
+    uint64_t AlignBytes = MA->value();
+    if (AlignBytes == 0)
+      AlignBytes = 1;
     VAList = DAG.getNode(ISD::ADD, DL, PtrVT, VAList,
-                         DAG.getConstant(AlignUnits - 1, DL, PtrVT));
+                         DAG.getConstant(AlignBytes - 1, DL, PtrVT));
     VAList = DAG.getNode(ISD::AND, DL, PtrVT, VAList,
-                         DAG.getSignedConstant(-(int64_t)AlignUnits, DL, PtrVT));
+                         DAG.getSignedConstant(-(int64_t)AlignBytes, DL, PtrVT));
   }
 
   uint64_t ArgBytes = DAG.getDataLayout()
                           .getTypeAllocSize(VT.getTypeForEVT(*DAG.getContext()))
                           .getKnownMinValue();
-  uint64_t ArgUnits = bytesToAddressUnits(ArgBytes);
-  if (ArgUnits == 0)
-    ArgUnits = 1;
   SDValue NextVAList = DAG.getNode(ISD::ADD, DL, PtrVT, VAList,
-                                   DAG.getConstant(ArgUnits, DL, PtrVT));
+                                   DAG.getConstant(ArgBytes, DL, PtrVT));
 
   // Store the incremented va_list pointer.
   Chain = DAG.getStore(VAListLoad.getValue(1), DL, NextVAList, VAListPtr,
@@ -1384,8 +1484,7 @@ SDValue McasmTargetLowering::lowerGlobalAddress(SDValue Op,
   int64_t Offset = N->getOffset();
 
   // mcasm does not support symbol+offset syntax. Materialize symbol base only,
-  // then apply offsets with PTRADD so lowering can convert byte offsets to the
-  // target's address units.
+  // then apply offsets with PTRADD so lowering can preserve byte offsets.
   SDValue TargetAddr = DAG.getTargetGlobalAddress(GV, DL, Ty, 0);
 
   // Check if this is a function address

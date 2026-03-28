@@ -13,4 +13,5 @@ entry:
 
 ; CHECK-LABEL: const_gep_load:
 ; CHECK: mov [[BASE:r[0-9]+]], g
+; CHECK: add [[BASE]], 1
 ; CHECK-NOT: g+
