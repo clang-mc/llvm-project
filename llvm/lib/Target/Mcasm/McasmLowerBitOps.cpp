@@ -145,6 +145,115 @@ static Value *matchBitTrickAbs(Instruction &I) {
   return buildBranchFriendlyAbs(I, X, false);
 }
 
+static Value *getWordBasePtr(IRBuilder<> &B, Value *Ptr, Type *IntPtrTy) {
+  Value *PtrInt = B.CreatePtrToInt(Ptr, IntPtrTy, "mcasm.ptrint");
+  Value *WordInt =
+      B.CreateAnd(PtrInt, ConstantInt::get(IntPtrTy, ~uint64_t(3)),
+                  "mcasm.wordbase");
+  return B.CreateIntToPtr(WordInt, Ptr->getType(), "mcasm.wordptr");
+}
+
+static Value *getByteLane(IRBuilder<> &B, Value *Ptr, Type *IntPtrTy) {
+  Value *PtrInt = B.CreatePtrToInt(Ptr, IntPtrTy, "mcasm.ptrint");
+  return B.CreateAnd(PtrInt, ConstantInt::get(IntPtrTy, 3), "mcasm.lane");
+}
+
+static Value *getBitShift(IRBuilder<> &B, Value *Lane, Type *IntPtrTy,
+                          Type *I32) {
+  Value *Shift = B.CreateShl(Lane, ConstantInt::get(IntPtrTy, 3),
+                             "mcasm.bitshift");
+  if (Shift->getType() != I32)
+    Shift = B.CreateTrunc(Shift, I32, "mcasm.bitshift32");
+  return Shift;
+}
+
+static void expandSubwordStore(StoreInst &SI, SmallVectorImpl<Instruction *> &ToErase,
+                               Type *I32, Type *IntPtrTy) {
+  Type *Ty = SI.getValueOperand()->getType();
+  if (!(Ty->isIntegerTy(8) || Ty->isIntegerTy(16)))
+    return;
+  if (SI.isVolatile() || SI.isAtomic())
+    return;
+
+  IRBuilder<> B(&SI);
+  B.SetCurrentDebugLocation(SI.getDebugLoc());
+
+  Value *Ptr = SI.getPointerOperand();
+  Value *Lane = getByteLane(B, Ptr, IntPtrTy);
+  Value *WordPtr = getWordBasePtr(B, Ptr, IntPtrTy);
+  auto *OldWord = B.CreateLoad(I32, WordPtr, "mcasm.oldword");
+  OldWord->setAlignment(Align(4));
+
+  Value *Shift = getBitShift(B, Lane, IntPtrTy, I32);
+  Value *Stored = B.CreateZExtOrTrunc(SI.getValueOperand(), I32, "mcasm.store32");
+
+  if (Ty->isIntegerTy(8)) {
+    Value *Mask = B.CreateShl(ConstantInt::get(I32, 0xFF), Shift, "mcasm.mask");
+    Value *Cleared =
+        B.CreateAnd(OldWord, B.CreateXor(Mask, ConstantInt::get(I32, -1)),
+                    "mcasm.cleared");
+    Value *Inserted = B.CreateShl(
+        B.CreateAnd(Stored, ConstantInt::get(I32, 0xFF)), Shift,
+        "mcasm.inserted");
+    auto *NewStore = B.CreateStore(B.CreateOr(Cleared, Inserted), WordPtr);
+    NewStore->setAlignment(Align(4));
+    ToErase.push_back(&SI);
+    return;
+  }
+
+  bool SingleWordHalfword = SI.getAlign() >= Align(2);
+  if (SingleWordHalfword) {
+    Value *Mask =
+        B.CreateShl(ConstantInt::get(I32, 0xFFFF), Shift, "mcasm.mask16");
+    Value *Cleared =
+        B.CreateAnd(OldWord, B.CreateXor(Mask, ConstantInt::get(I32, -1)),
+                    "mcasm.cleared16");
+    Value *Inserted = B.CreateShl(
+        B.CreateAnd(Stored, ConstantInt::get(I32, 0xFFFF)), Shift,
+        "mcasm.inserted16");
+    auto *NewStore = B.CreateStore(B.CreateOr(Cleared, Inserted), WordPtr);
+    NewStore->setAlignment(Align(4));
+    ToErase.push_back(&SI);
+    return;
+  }
+
+  Value *LowByte = B.CreateAnd(Stored, ConstantInt::get(I32, 0xFF), "mcasm.lo");
+  Value *HighByte = B.CreateAnd(B.CreateLShr(Stored, ConstantInt::get(I32, 8)),
+                                ConstantInt::get(I32, 0xFF), "mcasm.hi");
+
+  Value *LowMask =
+      B.CreateShl(ConstantInt::get(I32, 0xFF), Shift, "mcasm.lowmask");
+  Value *LowCleared =
+      B.CreateAnd(OldWord, B.CreateXor(LowMask, ConstantInt::get(I32, -1)),
+                  "mcasm.lowcleared");
+  Value *LowInserted = B.CreateShl(LowByte, Shift, "mcasm.lowinserted");
+  auto *FirstStore = B.CreateStore(B.CreateOr(LowCleared, LowInserted), WordPtr);
+  FirstStore->setAlignment(Align(4));
+
+  Value *NextPtrInt =
+      B.CreateAdd(B.CreatePtrToInt(Ptr, IntPtrTy), ConstantInt::get(IntPtrTy, 1),
+                  "mcasm.nextptrint");
+  Value *NextPtr = B.CreateIntToPtr(NextPtrInt, Ptr->getType(), "mcasm.nextptr");
+  Value *NextLane = getByteLane(B, NextPtr, IntPtrTy);
+  Value *NextWordPtr = getWordBasePtr(B, NextPtr, IntPtrTy);
+  auto *NextOld = B.CreateLoad(I32, NextWordPtr, "mcasm.nextoldword");
+  NextOld->setAlignment(Align(4));
+  Value *NextShift = getBitShift(B, NextLane, IntPtrTy, I32);
+  Value *NextMask =
+      B.CreateShl(ConstantInt::get(I32, 0xFF), NextShift, "mcasm.nextmask");
+  Value *NextCleared =
+      B.CreateAnd(NextOld, B.CreateXor(NextMask, ConstantInt::get(I32, -1)),
+                  "mcasm.nextcleared");
+  Value *NextInserted =
+      B.CreateShl(HighByte, NextShift, "mcasm.nextinserted");
+  auto *SecondStore =
+      B.CreateStore(B.CreateOr(NextCleared, NextInserted), NextWordPtr);
+  SecondStore->setAlignment(Align(4));
+  (void)FirstStore;
+  (void)SecondStore;
+  ToErase.push_back(&SI);
+}
+
 static Value *branchifySelect(SelectInst &Sel) {
   BasicBlock *ThenBB = nullptr;
   BasicBlock *ElseBB = nullptr;
@@ -177,8 +286,9 @@ bool McasmLowerBitOpsPass::runOnModule(Module &M) {
   FunctionCallee AddDi3 = getFn(M, "__adddi3", I64, {I64, I64});
   FunctionCallee SubDi3 = getFn(M, "__subdi3", I64, {I64, I64});
 
-  // mcasm uses 32-bit scalar storage slots. Rewrite i8/i16 memory operations
-  // to i32 loads/stores in IR to avoid subword SelectionDAG paths.
+  // Keep subword loads in IR so SelectionDAG lowering can preserve byte
+  // semantics. Rewrite subword stores here into explicit i32 RMW sequences to
+  // avoid pathological byte-store DAG lowering.
   {
     SmallVector<Instruction *, 128> ToEraseMem;
     for (Function &F : M) {
@@ -187,37 +297,10 @@ bool McasmLowerBitOpsPass::runOnModule(Module &M) {
 
       for (BasicBlock &BB : F) {
         for (Instruction &I : BB) {
-          if (auto *LI = dyn_cast<LoadInst>(&I)) {
-            Type *Ty = LI->getType();
-            if (!(Ty->isIntegerTy(8) || Ty->isIntegerTy(16)))
-              continue;
-            if (LI->isVolatile() || LI->isAtomic())
-              continue;
-
-            IRBuilder<> B(LI);
-            auto *Wide = B.CreateLoad(I32, LI->getPointerOperand(),
-                                      LI->getName() + ".w32");
-            Wide->setAlignment(LI->getAlign());
-            Value *Narrow = B.CreateTrunc(Wide, Ty, LI->getName() + ".narrow");
-            LI->replaceAllUsesWith(Narrow);
-            ToEraseMem.push_back(LI);
-            Changed = true;
-            continue;
-          }
-
           if (auto *SI = dyn_cast<StoreInst>(&I)) {
-            Type *Ty = SI->getValueOperand()->getType();
-            if (!(Ty->isIntegerTy(8) || Ty->isIntegerTy(16)))
-              continue;
-            if (SI->isVolatile() || SI->isAtomic())
-              continue;
-
-            IRBuilder<> B(SI);
-            Value *Wide = B.CreateZExt(SI->getValueOperand(), I32, "st.w32");
-            auto *NewStore = B.CreateStore(Wide, SI->getPointerOperand());
-            NewStore->setAlignment(SI->getAlign());
-            ToEraseMem.push_back(SI);
-            Changed = true;
+            expandSubwordStore(*SI, ToEraseMem, I32, Type::getInt32Ty(Ctx));
+            if (!ToEraseMem.empty() && ToEraseMem.back() == SI)
+              Changed = true;
           }
         }
       }

@@ -12,7 +12,6 @@ tablegen(LLVM McasmGenDAGISel.inc -gen-dag-isel)
 tablegen(LLVM McasmGenDisassemblerTables.inc -gen-disassembler)
 tablegen(LLVM McasmGenInstrMapping.inc -gen-x86-instr-mapping)
 tablegen(LLVM McasmGenExegesis.inc -gen-exegesis)
-tablegen(LLVM McasmGenFastISel.inc -gen-fast-isel)
 tablegen(LLVM McasmGenInstrInfo.inc -gen-instr-info
                                   -instr-info-expand-mi-operand-info=0)
 tablegen(LLVM McasmGenRegisterInfo.inc -gen-register-info)

@@ -59,22 +59,26 @@ entry:
 }
 
 ; CHECK-LABEL: sum_first_two:
-; CHECK: add r0, 4
-; CHECK: add r1, 8
-; CHECK: mov [rsp], r1
-; CHECK: add r0, 12
+; CHECK: sub rsp, 32
+; CHECK: mov [rsp+1], r1
+; CHECK: mov [rsp+7], r0
 ; CHECK-LABEL: read_i64:
-; CHECK: add r0, 4
-; CHECK: add r1, 8
-; CHECK: add r0, 12
+; CHECK: sub rsp, 32
+; CHECK: mov [rsp+1], r1
+; CHECK: mov [rsp+7], r0
 ; CHECK-LABEL: copy_and_read:
+; CHECK: sub rsp, 36
+; CHECK: mov [rsp+8], rsp
+; CHECK: mov [rsp+7], r0
+; CHECK-LABEL: stack_vararg_after_8_regs:
+; CHECK: sub rsp, 4
 ; CHECK: add r0, 4
 ; CHECK: mov [rsp], r0
-; CHECK-LABEL: stack_vararg_after_8_regs:
-; CHECK: add {{[a-z][0-9]+}}, 4
 ; CHECK: mov rax, [rsp]
 ; CHECK-LABEL: vararg_call_shadow:
-; CHECK-DAG: add {{[a-z][0-9]+}}, 32
-; CHECK-DAG: add {{[a-z][0-9]+}}, 36
-; CHECK-DAG: add {{[a-z][0-9]+}}, 40
+; CHECK: sub rsp, 12
+; CHECK: add r0, 8
+; CHECK: mov [r0], t2
+; CHECK: add t3, 4
+; CHECK: mov [t3], t1
 ; CHECK: call vcallee

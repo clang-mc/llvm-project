@@ -105,6 +105,9 @@ class McasmMachineFunctionInfo : public MachineFunctionInfo {
 
   /// VarArgsFrameIndex - FrameIndex for start of varargs area.
   int VarArgsFrameIndex = 0;
+  /// VarArgsRegSaveSize - Number of bytes reserved in the callee frame to
+  /// linearize register-passed variadic arguments.
+  unsigned VarArgsRegSaveSize = 0;
   /// RegSaveFrameIndex - Mcasm-64 vararg func register save area.
   int RegSaveFrameIndex = 0;
   /// VarArgsGPOffset - Mcasm-64 vararg func int reg offset.
@@ -236,6 +239,9 @@ public:
 
   int getVarArgsFrameIndex() const { return VarArgsFrameIndex; }
   void setVarArgsFrameIndex(int Idx) { VarArgsFrameIndex = Idx; }
+
+  unsigned getVarArgsRegSaveSize() const { return VarArgsRegSaveSize; }
+  void setVarArgsRegSaveSize(unsigned Size) { VarArgsRegSaveSize = Size; }
 
   int getRegSaveFrameIndex() const { return RegSaveFrameIndex; }
   void setRegSaveFrameIndex(int Idx) { RegSaveFrameIndex = Idx; }

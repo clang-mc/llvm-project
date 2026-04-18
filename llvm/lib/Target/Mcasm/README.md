@@ -167,3 +167,11 @@ Mcasm/
 ## 许可证
 
 与 LLVM 项目相同，使用 Apache License 2.0 with LLVM Exceptions。
+## VarArg ABI Notes
+
+- Variadic callees own the vararg register save area. The caller does not mirror `r0-r7` into `[rsp + off]`.
+- `LowerFormalArguments` spills unnamed register arguments into a callee save area and points `va_list` at that linearized region.
+- `va_list` remains `void *` and advances in 4-byte steps across the saved-register area and then the incoming stack arguments.
+- Mcasm now emits a real stack frame in prologue and epilogue so local frame, vararg save area, outgoing call frame, and incoming arguments do not alias on bare `[rsp]`.
+- Mcasm does not support FastISel. All codegen, including `-O0`, is intentionally routed through SelectionDAG.
+- `CALL` still does not implicitly modify `rsp`; stack movement is explicit in frame lowering and dynamic stack allocation paths.

@@ -154,6 +154,7 @@ private:
   SDValue lowerCTLZ(SDValue Op, SelectionDAG &DAG) const;
   SDValue lowerCTPOP(SDValue Op, SelectionDAG &DAG) const;
   SDValue lowerVASTART(SDValue Op, SelectionDAG &DAG) const;
+  SDValue lowerVACOPY(SDValue Op, SelectionDAG &DAG) const;
   SDValue lowerVAARG(SDValue Op, SelectionDAG &DAG) const;
   SDValue lowerByteSemanticLoad(SDValue Op, SelectionDAG &DAG) const;
   SDValue lowerByteSemanticStore(SDValue Op, SelectionDAG &DAG) const;

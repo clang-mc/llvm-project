@@ -56,15 +56,22 @@ static SDValue getAddressUnitSize(SDLoc DL, SelectionDAG &DAG, EVT PtrVT) {
 static SDValue lowerPointerToWordAddress(SDValue Ptr, SDLoc DL,
                                          SelectionDAG &DAG) {
   EVT PtrVT = Ptr.getValueType();
-  return DAG.getNode(ISD::SDIV, DL, PtrVT, Ptr,
-                     getAddressUnitSize(DL, DAG, PtrVT));
+  return DAG.getNode(ISD::SRL, DL, PtrVT, Ptr,
+                     DAG.getConstant(2, DL, PtrVT));
 }
 
 static SDValue lowerPointerByteLane(SDValue Ptr, SDLoc DL,
                                     SelectionDAG &DAG) {
   EVT PtrVT = Ptr.getValueType();
-  return DAG.getNode(ISD::SREM, DL, PtrVT, Ptr,
-                     getAddressUnitSize(DL, DAG, PtrVT));
+  return DAG.getNode(ISD::AND, DL, PtrVT, Ptr,
+                     DAG.getConstant(3, DL, PtrVT));
+}
+
+static SDValue lowerPointerBitShiftAmount(SDValue Lane, SDLoc DL,
+                                          SelectionDAG &DAG) {
+  EVT PtrVT = Lane.getValueType();
+  return DAG.getNode(ISD::SHL, DL, PtrVT, Lane,
+                     DAG.getConstant(3, DL, PtrVT));
 }
 
 McasmTargetLowering::McasmTargetLowering(const McasmTargetMachine &TM,
@@ -338,7 +345,7 @@ McasmTargetLowering::McasmTargetLowering(const McasmTargetMachine &TM,
   // Expand unsupported operations
   setOperationAction(ISD::VASTART, MVT::Other, Custom);
   setOperationAction(ISD::VAARG, MVT::Other, Custom);
-  setOperationAction(ISD::VACOPY, MVT::Other, Expand);
+  setOperationAction(ISD::VACOPY, MVT::Other, Custom);
   setOperationAction(ISD::VAEND, MVT::Other, Expand);
 
   // Vector operations - mcasm does not support SIMD/vector operations
@@ -481,6 +488,7 @@ SDValue McasmTargetLowering::LowerFormalArguments(
   MachineFrameInfo &MFI = MF.getFrameInfo();
   MachineRegisterInfo &RegInfo = MF.getRegInfo();
   constexpr unsigned ArgSlotSize = 4;
+  SmallVector<SDValue, 8> OutChains;
 
   // Analyze incoming arguments according to calling convention
   SmallVector<CCValAssign, 16> ArgLocs;
@@ -522,20 +530,43 @@ SDValue McasmTargetLowering::LowerFormalArguments(
     auto *FuncInfo = MF.getInfo<McasmMachineFunctionInfo>();
     unsigned FirstVAReg = CCInfo.getFirstUnallocated(ArgRegs);
     const unsigned NumRegs = sizeof(ArgRegs) / sizeof(ArgRegs[0]);
+    const unsigned VarArgsRegSaveSize =
+        ArgSlotSize * (NumRegs - FirstVAReg);
+    FuncInfo->setArgumentStackSize(CCInfo.getStackSize());
+    FuncInfo->setVarArgsRegSaveSize(VarArgsRegSaveSize);
 
-    if (FirstVAReg < NumRegs) {
-      // Variadic calls reserve a fixed incoming shadow area where caller writes
-      // argument-register payloads. Point va_list at the first vararg register
-      // slot; no callee-side register spills are needed here.
-      int FirstOffset = static_cast<int>(FirstVAReg * ArgSlotSize);
-      int FirstFI = MFI.CreateFixedObject(ArgSlotSize, FirstOffset, true);
-      FuncInfo->setVarArgsFrameIndex(FirstFI);
-    } else {
+    if (VarArgsRegSaveSize == 0) {
       // All argument registers are consumed by fixed parameters.
       // Variable arguments start in the incoming stack argument area.
       int FI = MFI.CreateFixedObject(ArgSlotSize, CCInfo.getStackSize(), true);
       FuncInfo->setVarArgsFrameIndex(FI);
+      FuncInfo->setRegSaveFrameIndex(0);
+    } else {
+      int FI =
+          MFI.CreateFixedObject(VarArgsRegSaveSize, -VarArgsRegSaveSize, false);
+      FuncInfo->setVarArgsFrameIndex(FI);
+      FuncInfo->setRegSaveFrameIndex(FI);
+
+      SDValue FIN = DAG.getFrameIndex(FI, MVT::i32);
+      const TargetRegisterClass *RC = &Mcasm::GR32RegClass;
+      for (unsigned I = FirstVAReg; I < NumRegs; ++I) {
+        Register VReg = RegInfo.createVirtualRegister(RC);
+        RegInfo.addLiveIn(ArgRegs[I], VReg);
+        SDValue ArgValue = DAG.getCopyFromReg(Chain, dl, VReg, MVT::i32);
+        SDValue Store = DAG.getStore(
+            ArgValue.getValue(1), dl, ArgValue, FIN,
+            MachinePointerInfo::getFixedStack(MF, FI,
+                                              (I - FirstVAReg) * ArgSlotSize));
+        OutChains.push_back(Store);
+        FIN = DAG.getMemBasePlusOffset(FIN, TypeSize::getFixed(ArgSlotSize),
+                                       dl);
+      }
     }
+  }
+
+  if (!OutChains.empty()) {
+    OutChains.push_back(Chain);
+    Chain = DAG.getNode(ISD::TokenFactor, dl, MVT::Other, OutChains);
   }
 
   return Chain;
@@ -557,11 +588,6 @@ SDValue McasmTargetLowering::LowerCall(
   // Analyze outgoing arguments
   SmallVector<CCValAssign, 16> ArgLocs;
   CCState CCInfo(CallConv, isVarArg, MF, ArgLocs, *DAG.getContext());
-  constexpr unsigned ArgSlotSize = 4;
-  constexpr unsigned NumArgRegs = 8;
-  constexpr unsigned VarArgRegSaveAreaSize = NumArgRegs * ArgSlotSize;
-  if (isVarArg)
-    CCInfo.AllocateStack(VarArgRegSaveAreaSize, Align(ArgSlotSize));
   CCInfo.AnalyzeCallOperands(Outs, CC_Mcasm);
 
   // Get the size of the outgoing arguments stack space
@@ -671,31 +697,6 @@ SDValue McasmTargetLowering::LowerCall(
     if (VA.isRegLoc()) {
       // Queue up register to pass
       RegsToPass.push_back(std::make_pair(VA.getLocReg(), Arg));
-
-      // For variadic calls, mirror register arguments into the reserved
-      // shadow area so callee va_start/va_arg can read them as a linear list.
-      if (isVarArg) {
-        int ShadowIndex = -1;
-        switch (VA.getLocReg()) {
-        case Mcasm::r0: ShadowIndex = 0; break;
-        case Mcasm::r1: ShadowIndex = 1; break;
-        case Mcasm::r2: ShadowIndex = 2; break;
-        case Mcasm::r3: ShadowIndex = 3; break;
-        case Mcasm::r4: ShadowIndex = 4; break;
-        case Mcasm::r5: ShadowIndex = 5; break;
-        case Mcasm::r6: ShadowIndex = 6; break;
-        case Mcasm::r7: ShadowIndex = 7; break;
-        default: break;
-        }
-        if (ShadowIndex >= 0) {
-          SDValue SlotOff = DAG.getIntPtrConstant(ShadowIndex, dl);
-          SDValue ShadowPtr = DAG.getNode(
-              ISD::ADD, dl, MVT::i32, DAG.getRegister(Mcasm::rsp, MVT::i32),
-              SlotOff);
-          MemOpChains.push_back(
-              DAG.getStore(Chain, dl, Arg, ShadowPtr, MachinePointerInfo()));
-        }
-      }
     } else {
       // Stack argument
       assert(VA.isMemLoc() && "Expected memory location");
@@ -942,8 +943,7 @@ SDValue McasmTargetLowering::lowerByteSemanticLoad(SDValue Op,
   SDValue Value = WideLoad;
 
   if (MemVT == MVT::i8) {
-    SDValue ShiftAmt =
-        DAG.getNode(ISD::MUL, DL, PtrVT, Lane, DAG.getConstant(8, DL, PtrVT));
+    SDValue ShiftAmt = lowerPointerBitShiftAmount(Lane, DL, DAG);
     if (PtrVT != MVT::i32)
       ShiftAmt = DAG.getNode(ISD::TRUNCATE, DL, MVT::i32, ShiftAmt);
     Value = DAG.getNode(ISD::SRL, DL, MVT::i32, Value, ShiftAmt);
@@ -959,10 +959,26 @@ SDValue McasmTargetLowering::lowerByteSemanticLoad(SDValue Op,
     return DAG.getMergeValues(Ops, DL);
   }
 
-  SDValue ShiftAmt =
-      DAG.getNode(ISD::MUL, DL, PtrVT, Lane, DAG.getConstant(8, DL, PtrVT));
+  SDValue ShiftAmt = lowerPointerBitShiftAmount(Lane, DL, DAG);
   if (PtrVT != MVT::i32)
     ShiftAmt = DAG.getNode(ISD::TRUNCATE, DL, MVT::i32, ShiftAmt);
+  bool SingleWordHalfword = LD->getAlign() >= Align(2);
+  if (const auto *LaneC = dyn_cast<ConstantSDNode>(Lane))
+    SingleWordHalfword = SingleWordHalfword || LaneC->getZExtValue() != 3;
+  if (SingleWordHalfword) {
+    Value = DAG.getNode(ISD::SRL, DL, MVT::i32, Value, ShiftAmt);
+    Value = DAG.getNode(ISD::AND, DL, MVT::i32, Value,
+                        DAG.getConstant(0xFFFF, DL, MVT::i32));
+    if (LD->getExtensionType() == ISD::SEXTLOAD) {
+      SDValue Amt = DAG.getConstant(16, DL, MVT::i32);
+      Value = DAG.getNode(ISD::SRA, DL, MVT::i32,
+                          DAG.getNode(ISD::SHL, DL, MVT::i32, Value, Amt),
+                          Amt);
+    }
+    SDValue Ops[] = {Value, WideLoad.getValue(1)};
+    return DAG.getMergeValues(Ops, DL);
+  }
+
   SDValue LowByte = DAG.getNode(ISD::SRL, DL, MVT::i32, Value, ShiftAmt);
   LowByte = DAG.getNode(ISD::AND, DL, MVT::i32, LowByte,
                         DAG.getConstant(0xFF, DL, MVT::i32));
@@ -976,8 +992,7 @@ SDValue McasmTargetLowering::lowerByteSemanticLoad(SDValue Op,
                   MachinePointerInfo(), Align(4),
                   LD->getMemOperand()->getFlags(), LD->getAAInfo(),
                   LD->getRanges());
-  SDValue NextShiftAmt = DAG.getNode(ISD::MUL, DL, PtrVT, NextLane,
-                                     DAG.getConstant(8, DL, PtrVT));
+  SDValue NextShiftAmt = lowerPointerBitShiftAmount(NextLane, DL, DAG);
   if (PtrVT != MVT::i32)
     NextShiftAmt = DAG.getNode(ISD::TRUNCATE, DL, MVT::i32, NextShiftAmt);
   SDValue HighByte =
@@ -1023,8 +1038,7 @@ SDValue McasmTargetLowering::lowerByteSemanticStore(SDValue Op,
   SDValue OldWord =
       DAG.getLoad(MVT::i32, DL, ST->getChain(), WordPtr, ST->getPointerInfo(),
                   Align(4), ST->getMemOperand()->getFlags(), ST->getAAInfo());
-  SDValue ShiftAmt =
-      DAG.getNode(ISD::MUL, DL, PtrVT, Lane, DAG.getConstant(8, DL, PtrVT));
+  SDValue ShiftAmt = lowerPointerBitShiftAmount(Lane, DL, DAG);
   if (PtrVT != MVT::i32)
     ShiftAmt = DAG.getNode(ISD::TRUNCATE, DL, MVT::i32, ShiftAmt);
 
@@ -1040,7 +1054,29 @@ SDValue McasmTargetLowering::lowerByteSemanticStore(SDValue Op,
                     DAG.getNode(ISD::AND, DL, MVT::i32, Value,
                                 DAG.getConstant(0xFF, DL, MVT::i32)),
                     ShiftAmt);
-    return DAG.getStore(ST->getChain(), DL,
+    return DAG.getStore(OldWord.getValue(1), DL,
+                        DAG.getNode(ISD::OR, DL, MVT::i32, Cleared, Inserted),
+                        WordPtr, ST->getPointerInfo(), Align(4),
+                        ST->getMemOperand()->getFlags(), ST->getAAInfo());
+  }
+
+  bool SingleWordHalfword = ST->getAlign() >= Align(2);
+  if (const auto *LaneC = dyn_cast<ConstantSDNode>(Lane))
+    SingleWordHalfword = SingleWordHalfword || LaneC->getZExtValue() != 3;
+  if (SingleWordHalfword) {
+    SDValue MaskShifted =
+        DAG.getNode(ISD::SHL, DL, MVT::i32,
+                    DAG.getConstant(0xFFFF, DL, MVT::i32), ShiftAmt);
+    SDValue Cleared = DAG.getNode(
+        ISD::AND, DL, MVT::i32, OldWord,
+        DAG.getNode(ISD::XOR, DL, MVT::i32, MaskShifted,
+                    DAG.getConstant(-1, DL, MVT::i32)));
+    SDValue Inserted =
+        DAG.getNode(ISD::SHL, DL, MVT::i32,
+                    DAG.getNode(ISD::AND, DL, MVT::i32, Value,
+                                DAG.getConstant(0xFFFF, DL, MVT::i32)),
+                    ShiftAmt);
+    return DAG.getStore(OldWord.getValue(1), DL,
                         DAG.getNode(ISD::OR, DL, MVT::i32, Cleared, Inserted),
                         WordPtr, ST->getPointerInfo(), Align(4),
                         ST->getMemOperand()->getFlags(), ST->getAAInfo());
@@ -1064,7 +1100,7 @@ SDValue McasmTargetLowering::lowerByteSemanticStore(SDValue Op,
   SDValue FirstStoreValue =
       DAG.getNode(ISD::OR, DL, MVT::i32, LowCleared, LowInserted);
   SDValue FirstStore =
-      DAG.getStore(ST->getChain(), DL, FirstStoreValue, WordPtr,
+      DAG.getStore(OldWord.getValue(1), DL, FirstStoreValue, WordPtr,
                    ST->getPointerInfo(), Align(4),
                    ST->getMemOperand()->getFlags(), ST->getAAInfo());
 
@@ -1075,8 +1111,7 @@ SDValue McasmTargetLowering::lowerByteSemanticStore(SDValue Op,
   SDValue NextOld =
       DAG.getLoad(MVT::i32, DL, FirstStore, NextWordPtr, MachinePointerInfo(),
                   Align(4), ST->getMemOperand()->getFlags(), ST->getAAInfo());
-  SDValue NextShiftAmt = DAG.getNode(ISD::MUL, DL, PtrVT, NextLane,
-                                     DAG.getConstant(8, DL, PtrVT));
+  SDValue NextShiftAmt = lowerPointerBitShiftAmount(NextLane, DL, DAG);
   if (PtrVT != MVT::i32)
     NextShiftAmt = DAG.getNode(ISD::TRUNCATE, DL, MVT::i32, NextShiftAmt);
   SDValue NextMaskShifted = DAG.getNode(
@@ -1202,6 +1237,8 @@ SDValue McasmTargetLowering::LowerOperation(SDValue Op, SelectionDAG &DAG) const
 
   case ISD::VASTART:
     return lowerVASTART(Op, DAG);
+  case ISD::VACOPY:
+    return lowerVACOPY(Op, DAG);
   case ISD::VAARG:
     return lowerVAARG(Op, DAG);
 
@@ -1433,6 +1470,26 @@ SDValue McasmTargetLowering::lowerVASTART(SDValue Op,
     SV = SVN->getValue();
   return DAG.getStore(Op.getOperand(0), DL, VarArgsAddr, Op.getOperand(1),
                       MachinePointerInfo(SV));
+}
+
+SDValue McasmTargetLowering::lowerVACOPY(SDValue Op, SelectionDAG &DAG) const {
+  SDLoc DL(Op);
+  EVT PtrVT = getPointerTy(DAG.getDataLayout());
+  SDValue Chain = Op.getOperand(0);
+  SDValue DstPtr = Op.getOperand(1);
+  SDValue SrcPtr = Op.getOperand(2);
+
+  const Value *DstSV = nullptr;
+  const Value *SrcSV = nullptr;
+  if (auto *SVN = dyn_cast<SrcValueSDNode>(Op.getOperand(3)))
+    DstSV = SVN->getValue();
+  if (auto *SVN = dyn_cast<SrcValueSDNode>(Op.getOperand(4)))
+    SrcSV = SVN->getValue();
+
+  SDValue Load =
+      DAG.getLoad(PtrVT, DL, Chain, SrcPtr, MachinePointerInfo(SrcSV));
+  return DAG.getStore(Load.getValue(1), DL, Load, DstPtr,
+                      MachinePointerInfo(DstSV));
 }
 
 SDValue McasmTargetLowering::lowerVAARG(SDValue Op, SelectionDAG &DAG) const {

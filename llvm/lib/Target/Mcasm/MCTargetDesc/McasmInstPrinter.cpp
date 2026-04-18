@@ -48,6 +48,25 @@ void McasmInstPrinter::printInst(const MCInst *MI, uint64_t Address,
                                     StringRef Annot,
                                     const MCSubtargetInfo &STI,
                                     raw_ostream &OS) {
+  switch (MI->getOpcode()) {
+  case Mcasm::ADD32ri:
+    OS << "add\t";
+    printOperand(MI, 0, STI, OS);
+    OS << ", ";
+    printOperand(MI, 2, STI, OS);
+    printAnnotation(OS, Annot);
+    return;
+  case Mcasm::SUB32ri:
+    OS << "sub\t";
+    printOperand(MI, 0, STI, OS);
+    OS << ", ";
+    printOperand(MI, 2, STI, OS);
+    printAnnotation(OS, Annot);
+    return;
+  default:
+    break;
+  }
+
   // Try to print any aliases first.
   if (!printAliasInstr(MI, Address, STI, OS))
     printInstruction(MI, Address, STI, OS);

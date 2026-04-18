@@ -176,6 +176,15 @@ void McasmDAGToDAGISel::Select(SDNode *N) {
 bool McasmDAGToDAGISel::SelectAddr(SDNode *Parent, SDValue N, SDValue &Base,
                                    SDValue &Scale, SDValue &Index,
                                    SDValue &Disp, SDValue &Segment) {
+  if (auto *FIN = dyn_cast<FrameIndexSDNode>(N)) {
+    Base = CurDAG->getTargetFrameIndex(FIN->getIndex(), MVT::i32);
+    Scale = CurDAG->getTargetConstant(1, SDLoc(N), MVT::i32);
+    Index = CurDAG->getRegister(0, MVT::i32);
+    Disp = CurDAG->getTargetConstant(0, SDLoc(N), MVT::i32);
+    Segment = CurDAG->getRegister(0, MVT::i32);
+    return true;
+  }
+
   // Start with a default addressing mode
   Base = N;
   Scale = CurDAG->getTargetConstant(1, SDLoc(N), MVT::i32);

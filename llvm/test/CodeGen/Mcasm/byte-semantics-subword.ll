@@ -20,6 +20,20 @@ entry:
   ret i32 %z
 }
 
+define void @store_byte_1() {
+entry:
+  %p = getelementptr inbounds [4 x i8], ptr @bytes, i32 0, i32 1
+  store i8 90, ptr %p, align 1
+  ret void
+}
+
+define void @store_half_1() {
+entry:
+  %p = getelementptr inbounds [4 x i16], ptr @halves, i32 0, i32 1
+  store i16 4660, ptr %p, align 2
+  ret void
+}
+
 ; CHECK-LABEL: load_byte_1:
 ; CHECK: mov [[B:r[0-9]+]], bytes
 ; CHECK: add [[B]], 1
@@ -29,6 +43,18 @@ entry:
 ; CHECK: mov [[H:r[0-9]+]], halves
 ; CHECK: add [[H]], 2
 ; CHECK-NOT: halves+
+
+; CHECK-LABEL: store_byte_1:
+; CHECK: mov [[SB:r[0-9]+]], bytes
+; CHECK: add [[SB]], 1
+; CHECK: mov
+; CHECK: mov [{{r[0-9]+}}], rax
+
+; CHECK-LABEL: store_half_1:
+; CHECK: mov [[SH:r[0-9]+]], halves
+; CHECK: add [[SH]], 2
+; CHECK: mov
+; CHECK: mov [{{r[0-9]+}}], rax
 
 ; CHECK: static bytes [1145258561]
 ; CHECK: static halves [131073, 262147]

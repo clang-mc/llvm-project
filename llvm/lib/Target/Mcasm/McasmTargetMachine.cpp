@@ -97,6 +97,10 @@ McasmTargetMachine::McasmTargetMachine(const Target &T, const Triple &TT,
       TLOF(createTLOF(getTargetTriple())), IsJIT(JIT) {
   debugLog("McasmTargetMachine constructor body entered");
 
+  // Mcasm uses SelectionDAG exclusively. FastISel is not supported.
+  setFastISel(false);
+  setO0WantsFastISel(false);
+
   // mcasm doesn't need .addrsig or .file directives
   this->Options.EmitAddrsig = false;
 

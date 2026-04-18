@@ -25,7 +25,28 @@
 #define GET_REGINFO_ENUM
 #include "McasmGenRegisterInfo.inc"
 
+#define GET_INSTRINFO_ENUM
+#include "McasmGenInstrInfo.inc"
+
 using namespace llvm;
+
+static int64_t normalizeFrameOffset(int64_t Offset) {
+  if (Offset > std::numeric_limits<int32_t>::max())
+    return static_cast<int32_t>(Offset);
+  return Offset;
+}
+
+static uint64_t getMcasmFrameSize(const MachineFunction &MF) {
+  const MachineFrameInfo &MFI = MF.getFrameInfo();
+  int64_t ExtraFixedArea = 0;
+  for (int I = MFI.getObjectIndexBegin(); I != 0; ++I) {
+    if (!MFI.isFixedObjectIndex(I))
+      continue;
+    int64_t Offset = normalizeFrameOffset(MFI.getObjectOffset(I));
+    ExtraFixedArea = std::max<int64_t>(ExtraFixedArea, -Offset);
+  }
+  return MFI.getStackSize() + ExtraFixedArea;
+}
 
 McasmFrameLowering::McasmFrameLowering(const McasmSubtarget &STI)
     : TargetFrameLowering(TargetFrameLowering::StackGrowsDown, Align(4), 0),
@@ -34,14 +55,44 @@ McasmFrameLowering::McasmFrameLowering(const McasmSubtarget &STI)
 void McasmFrameLowering::emitPrologue(MachineFunction &MF,
                                       MachineBasicBlock &MBB) const {
   MCASM_DEBUG_LOG("DEBUG emitPrologue: function=%s\n", MF.getName().str().c_str());
-  // TODO: Implement when we have basic instructions defined
+  MachineFrameInfo &MFI = MF.getFrameInfo();
+  uint64_t StackSize = getMcasmFrameSize(MF);
+  if (StackSize == 0) {
+    MCASM_DEBUG_LOG("DEBUG emitPrologue: empty frame\n");
+    return;
+  }
+
+  MachineBasicBlock::iterator InsertPt = MBB.begin();
+  DebugLoc DL;
+  if (InsertPt != MBB.end())
+    DL = InsertPt->getDebugLoc();
+
+  BuildMI(MBB, InsertPt, DL, TII.get(Mcasm::SUB32ri), Mcasm::rsp)
+      .addReg(Mcasm::rsp)
+      .addImm(StackSize)
+      .setMIFlag(MachineInstr::FrameSetup);
   MCASM_DEBUG_LOG("DEBUG emitPrologue: completed\n");
 }
 
 void McasmFrameLowering::emitEpilogue(MachineFunction &MF,
                                       MachineBasicBlock &MBB) const {
   MCASM_DEBUG_LOG("DEBUG emitEpilogue: function=%s\n", MF.getName().str().c_str());
-  // TODO: Implement when we have basic instructions defined
+  MachineFrameInfo &MFI = MF.getFrameInfo();
+  uint64_t StackSize = getMcasmFrameSize(MF);
+  if (StackSize == 0) {
+    MCASM_DEBUG_LOG("DEBUG emitEpilogue: empty frame\n");
+    return;
+  }
+
+  MachineBasicBlock::iterator InsertPt = MBB.getFirstTerminator();
+  DebugLoc DL;
+  if (InsertPt != MBB.end())
+    DL = InsertPt->getDebugLoc();
+
+  BuildMI(MBB, InsertPt, DL, TII.get(Mcasm::ADD32ri), Mcasm::rsp)
+      .addReg(Mcasm::rsp)
+      .addImm(StackSize)
+      .setMIFlag(MachineInstr::FrameDestroy);
   MCASM_DEBUG_LOG("DEBUG emitEpilogue: completed\n");
 }
 
@@ -55,19 +106,33 @@ bool McasmFrameLowering::hasFPImpl(const MachineFunction &MF) const {
 
 StackOffset McasmFrameLowering::getFrameIndexReference(
     const MachineFunction &MF, int FI, Register &FrameReg) const {
-  // TODO: Implement when we have basic instructions defined
-  // For now, return stack pointer as frame register
   FrameReg = Mcasm::rsp;
   const MachineFrameInfo &MFI = MF.getFrameInfo();
-  int64_t ByteOffset = MFI.getObjectOffset(FI);
-  return StackOffset::getFixed(ByteOffset);
+  int64_t ByteOffset =
+      normalizeFrameOffset(MFI.getObjectOffset(FI)) - getOffsetOfLocalArea();
+  return StackOffset::getFixed(ByteOffset + getMcasmFrameSize(MF));
 }
 
 MachineBasicBlock::iterator McasmFrameLowering::eliminateCallFramePseudoInstr(
     MachineFunction &MF, MachineBasicBlock &MBB,
     MachineBasicBlock::iterator MI) const {
-  // TODO: Implement when we have ADJCALLSTACKDOWN/UP instructions defined
-  // For now, just erase the pseudo instruction
+  if (hasReservedCallFrame(MF))
+    return MBB.erase(MI);
+
+  int64_t Amount = MI->getOperand(0).getImm();
+  if (Amount != 0) {
+    unsigned Opc = MI->getOpcode() == Mcasm::ADJCALLSTACKDOWN32
+                       ? Mcasm::SUB32ri
+                       : Mcasm::ADD32ri;
+    MachineInstr::MIFlag Flag =
+        MI->getOpcode() == Mcasm::ADJCALLSTACKDOWN32
+            ? MachineInstr::FrameSetup
+            : MachineInstr::FrameDestroy;
+    BuildMI(MBB, MI, MI->getDebugLoc(), TII.get(Opc), Mcasm::rsp)
+        .addReg(Mcasm::rsp)
+        .addImm(Amount)
+        .setMIFlag(Flag);
+  }
   return MBB.erase(MI);
 }
 
