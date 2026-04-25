@@ -367,7 +367,11 @@ phases::ID Driver::getFinalPhase(const DerivedArgList &DAL,
 
   // -S only runs up to the backend.
   } else if ((PhaseArg = DAL.getLastArg(options::OPT_S))) {
-    FinalPhase = phases::Backend;
+    llvm::Triple Target(llvm::Triple::normalize(getTargetTriple()));
+    if (isUsingLTO() && Target.getArch() == llvm::Triple::mcasm)
+      FinalPhase = phases::Link;
+    else
+      FinalPhase = phases::Backend;
 
   // -c compilation only runs up to the assembler.
   } else if ((PhaseArg = DAL.getLastArg(options::OPT_c))) {
@@ -4580,8 +4584,13 @@ void Driver::BuildActions(Compilation &C, DerivedArgList &Args,
       // rare cases, so make sure we aren't going to error about it.
       bool LinkingIR = Args.hasArg(options::OPT_emit_llvm) &&
                        C.getDefaultToolChain().getTriple().isSPIRV();
-      types::ID LT = LinkingIR && !Diags.hasErrorOccurred() ? types::TY_LLVM_BC
-                                                            : types::TY_Image;
+      bool LinkingMcasmAsm =
+          Args.hasArg(options::OPT_S) && isUsingLTO() &&
+          C.getDefaultToolChain().getTriple().getArch() == llvm::Triple::mcasm;
+      types::ID LT =
+          LinkingIR && !Diags.hasErrorOccurred()
+              ? types::TY_LLVM_BC
+              : (LinkingMcasmAsm ? types::TY_McAsm : types::TY_Image);
       LA = C.MakeAction<LinkJobAction>(LinkerInputs, LT);
     }
     if (!UseNewOffloadingDriver)
@@ -5241,6 +5250,10 @@ Action *Driver::ConstructPhaseAction(
                      C.getActiveOffloadKinds() != Action::OFK_None) &&
         !offloadDeviceOnly())
       return Input;
+
+    if (isUsingLTO() && TargetDeviceOffloadKind == Action::OFK_None &&
+        C.getDefaultToolChain().getTriple().getArch() == llvm::Triple::mcasm)
+      return C.MakeAction<BackendJobAction>(Input, types::TY_LLVM_BC);
 
     if (isUsingLTO() && TargetDeviceOffloadKind == Action::OFK_None) {
       types::ID Output;

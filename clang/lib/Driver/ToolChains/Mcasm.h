@@ -17,6 +17,12 @@ namespace driver {
 namespace tools {
 namespace mcasm {
 
+void constructLLVMLinkCommand(Compilation &C, const Tool &T,
+                              const JobAction &JA,
+                              const InputInfoList &Inputs,
+                              const InputInfo &Output,
+                              const llvm::opt::ArgList &Args);
+
 class LLVM_LIBRARY_VISIBILITY Linker final : public Tool {
 public:
   explicit Linker(const ToolChain &TC) : Tool("mcasm::Linker", "clang-mc", TC) {}
@@ -36,6 +42,8 @@ public:
 namespace toolchains {
 
 class LLVM_LIBRARY_VISIBILITY Mcasm final : public ToolChain {
+  bool NativeLLVMSupport;
+
 public:
   Mcasm(const Driver &D, const llvm::Triple &Triple,
         const llvm::opt::ArgList &Args);
@@ -47,6 +55,7 @@ public:
   bool isPICDefaultForced() const override { return false; }
   bool isCrossCompiling() const override { return true; }
   bool IsMathErrnoDefault() const override { return false; }
+  bool HasNativeLLVMSupport() const override { return NativeLLVMSupport; }
 
   const char *getDefaultLinker() const override { return "clang-mc"; }
   Tool *buildLinker() const override;
