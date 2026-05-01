@@ -48,35 +48,35 @@ int inline_literal_braces(int x) {
 }
 
 // ASM-LABEL: inline_input_only:
-// ASM: inline data modify storage std:vm s0 set value {a: -1}
-// ASM: inline execute store result storage std:vm s0.a int 1 run scoreboard players get
-// ASM: inline function _ll_shared:z/inline_input_only_0 with storage std:vm s0
+// ASM: inline data modify storage std:vm ls0 set value {a: -1}
+// ASM: inline execute store result storage std:vm ls0.a int 1 run scoreboard players get
+// ASM: inline function _ll_shared:z/inline_input_only_0 with storage std:vm ls0
 
 // ASM-LABEL: inline_reg_output:
-// ASM: inline data modify storage std:vm s0 set value {a: -1}
-// ASM: inline function _ll_shared:z/inline_reg_output_0 with storage std:vm s0
+// ASM: inline data modify storage std:vm ls0 set value {a: -1}
+// ASM: inline function _ll_shared:z/inline_reg_output_0 with storage std:vm ls0
 
 // ASM-LABEL: inline_output_only:
 // ASM: mov 1, r0
-// ASM-NOT: inline function _ll_shared:z/inline_output_only_0 with storage std:vm s0
+// ASM-NOT: inline function _ll_shared:z/inline_output_only_0 with storage std:vm ls0
 
 // ASM-LABEL: inline_multiline:
-// ASM: inline function _ll_shared:z/inline_multiline_0 with storage std:vm s0
+// ASM: inline function _ll_shared:z/inline_multiline_0 with storage std:vm ls0
 
 // ASM-LABEL: inline_duplicate_same_function:
-// ASM: inline function _ll_shared:z/inline_input_only_0 with storage std:vm s0
-// ASM: inline function _ll_shared:z/inline_input_only_0 with storage std:vm s0
-// ASM-NOT: inline function _ll_shared:z/inline_duplicate_same_function_0 with storage std:vm s0
+// ASM: inline function _ll_shared:z/inline_input_only_0 with storage std:vm ls0
+// ASM: inline function _ll_shared:z/inline_input_only_0 with storage std:vm ls0
+// ASM-NOT: inline function _ll_shared:z/inline_duplicate_same_function_0 with storage std:vm ls0
 
 // ASM-LABEL: inline_duplicate_cross_function:
-// ASM: inline function _ll_shared:z/inline_input_only_0 with storage std:vm s0
-// ASM-NOT: inline function _ll_shared:z/inline_duplicate_cross_function_0 with storage std:vm s0
+// ASM: inline function _ll_shared:z/inline_input_only_0 with storage std:vm ls0
+// ASM-NOT: inline function _ll_shared:z/inline_duplicate_cross_function_0 with storage std:vm ls0
 
 // ASM-LABEL: inline_distinct_helper:
-// ASM: inline function _ll_shared:z/inline_distinct_helper_0 with storage std:vm s0
+// ASM: inline function _ll_shared:z/inline_distinct_helper_0 with storage std:vm ls0
 
 // ASM-LABEL: inline_literal_braces:
-// ASM: inline function _ll_shared:z/inline_literal_braces_0 with storage std:vm s0
+// ASM: inline function _ll_shared:z/inline_literal_braces_0 with storage std:vm ls0
 
 // ASM: export _ll_shared:z/inline_input_only_0:
 // ASM: inline $return $(a)

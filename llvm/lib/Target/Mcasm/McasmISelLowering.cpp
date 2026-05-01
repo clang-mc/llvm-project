@@ -671,29 +671,6 @@ SDValue McasmTargetLowering::LowerCall(
     else if (VA.getLocInfo() == CCValAssign::BCvt)
       Arg = DAG.getNode(ISD::BITCAST, dl, VA.getLocVT(), Arg);
 
-    // Convert FrameIndex to actual address expression
-    // When passing the address of a stack variable (e.g., &array), the IR contains
-    // a FrameIndex node. We need to convert this to an actual address (rsp + offset).
-    if (Arg.getOpcode() == ISD::FrameIndex) {
-      auto *FI = cast<FrameIndexSDNode>(Arg);
-      // Get frame index reference
-      const McasmFrameLowering *TFI = static_cast<const McasmFrameLowering *>(
-          MF.getSubtarget().getFrameLowering());
-      Register FrameReg;
-      StackOffset Offset = TFI->getFrameIndexReference(MF, FI->getIndex(), FrameReg);
-
-      // Build: ADD rsp, offset in byte units.
-      SDValue FrameRegNode = DAG.getRegister(FrameReg, MVT::i32);
-      int64_t OffsetVal = Offset.getFixed();
-      if (OffsetVal != 0) {
-        SDValue OffsetNode = DAG.getConstant(OffsetVal, dl, MVT::i32);
-        Arg = DAG.getNode(ISD::ADD, dl, MVT::i32, FrameRegNode, OffsetNode);
-      } else {
-        // Offset is 0, just use the frame register directly
-        Arg = FrameRegNode;
-      }
-    }
-
     if (VA.isRegLoc()) {
       // Queue up register to pass
       RegsToPass.push_back(std::make_pair(VA.getLocReg(), Arg));
@@ -1249,25 +1226,6 @@ SDValue McasmTargetLowering::LowerOperation(SDValue Op, SelectionDAG &DAG) const
     SDValue Ptr = Op.getOperand(0);
     SDValue ByteOffset = Op.getOperand(1);
     EVT PtrVT = Op.getValueType();  // Preserve the pointer type
-
-    // Do not materialize FrameIndex directly as ADD src1 for two-address ADD32ri.
-    // Machine verifier requires tied src1 to be a register, not %stack.N.
-    if (Ptr.getOpcode() == ISD::FrameIndex) {
-      auto *FI = cast<FrameIndexSDNode>(Ptr);
-      MachineFunction &MF = DAG.getMachineFunction();
-      const auto *TFI = static_cast<const McasmFrameLowering *>(
-          MF.getSubtarget().getFrameLowering());
-      Register FrameReg;
-      StackOffset Offset = TFI->getFrameIndexReference(MF, FI->getIndex(), FrameReg);
-
-      SDValue Base = DAG.getRegister(FrameReg, PtrVT);
-      int64_t FixedOff = Offset.getFixed();
-      if (FixedOff != 0) {
-        Base = DAG.getNode(ISD::ADD, dl, PtrVT, Base,
-                           DAG.getConstant(FixedOff, dl, PtrVT));
-      }
-      Ptr = Base;
-    }
 
     return DAG.getNode(ISD::ADD, dl, PtrVT, Ptr, ByteOffset);
   }
@@ -1946,18 +1904,8 @@ SDValue McasmTargetLowering::lowerSELECT(SDValue Op, SelectionDAG &DAG) const {
   auto materializeFrameIndex = [&](SDValue V) -> SDValue {
     if (V.getOpcode() != ISD::FrameIndex)
       return V;
-    auto *FI = cast<FrameIndexSDNode>(V);
-    MachineFunction &MF = DAG.getMachineFunction();
-    const auto *TFI = static_cast<const McasmFrameLowering *>(
-        MF.getSubtarget().getFrameLowering());
-    Register FrameReg;
-    StackOffset Offset = TFI->getFrameIndexReference(MF, FI->getIndex(), FrameReg);
-    SDValue Base = DAG.getRegister(FrameReg, MVT::i32);
-    int64_t Off = Offset.getFixed();
-    if (Off == 0)
-      return Base;
-    return DAG.getNode(ISD::ADD, DL, MVT::i32, Base,
-                       DAG.getConstant(Off, DL, MVT::i32));
+    return DAG.getNode(ISD::ADD, DL, MVT::i32, V,
+                       DAG.getConstant(0, DL, MVT::i32));
   };
 
   auto selectI32 = [&](SDValue TV, SDValue FV) -> SDValue {

@@ -529,41 +529,16 @@ set(LLVM_INCLUDE_DIR ${CMAKE_CURRENT_BINARY_DIR}/include)
 
 # List of all targets to be built by default:
 set(LLVM_ALL_TARGETS
-  AArch64
-  AMDGPU
-  ARM
-  AVR
-  BPF
-  Hexagon
-  Lanai
-  LoongArch
   Mcasm
-  Mips
-  MSP430
-  NVPTX
-  PowerPC
-  RISCV
-  Sparc
-  SPIRV
-  SystemZ
-  VE
-  WebAssembly
-  X86
-  XCore
   )
 
 set(LLVM_ALL_EXPERIMENTAL_TARGETS
-  ARC
-  CSKY
-  DirectX
-  M68k
-  Xtensa
 )
 
 # List of targets with JIT support:
-set(LLVM_TARGETS_WITH_JIT X86 PowerPC AArch64 ARM Mips SystemZ)
+set(LLVM_TARGETS_WITH_JIT Mcasm)
 
-set(LLVM_TARGETS_TO_BUILD "all"
+set(LLVM_TARGETS_TO_BUILD "Mcasm"
     CACHE STRING "Semicolon-separated list of targets to build, or \"all\".")
 
 set(LLVM_EXPERIMENTAL_TARGETS_TO_BUILD ""
@@ -661,6 +636,11 @@ endif()
 
 if(LLVM_EXPERIMENTAL_TARGETS_TO_BUILD STREQUAL "all")
   set(LLVM_EXPERIMENTAL_TARGETS_TO_BUILD ${LLVM_ALL_EXPERIMENTAL_TARGETS})
+endif()
+
+if(LLVM_EXPERIMENTAL_TARGETS_TO_BUILD)
+  message(FATAL_ERROR
+    "This build is restricted to the Mcasm target; experimental targets are disabled.")
 endif()
 
 if("flang" IN_LIST LLVM_ENABLE_PROJECTS AND
@@ -1031,17 +1011,9 @@ find_package(Python3 ${LLVM_MINIMUM_PYTHON_VERSION} REQUIRED
 # first cmake run
 include(config-ix)
 
-# By default, we target the host, but this can be overridden at CMake
-# invocation time. Except on 64-bit AIX, where the system toolchain
-# expect 32-bit objects by default.
-if("${LLVM_HOST_TRIPLE}" MATCHES "^powerpc64-ibm-aix")
-  string(REGEX REPLACE "^powerpc64" "powerpc" LLVM_DEFAULT_TARGET_TRIPLE_DEFAULT "${LLVM_HOST_TRIPLE}")
-else()
-  # Only set default triple when native target is enabled.
-  if (LLVM_NATIVE_TARGET)
-    set(LLVM_DEFAULT_TARGET_TRIPLE_DEFAULT "${LLVM_HOST_TRIPLE}")
-  endif()
-endif()
+# Mcasm builds are intentionally single-target, so make clang default to mcasm
+# instead of the host triple.
+set(LLVM_DEFAULT_TARGET_TRIPLE_DEFAULT "mcasm")
 
 set(LLVM_DEFAULT_TARGET_TRIPLE "${LLVM_DEFAULT_TARGET_TRIPLE_DEFAULT}" CACHE STRING
     "Default target for which LLVM will generate code." )

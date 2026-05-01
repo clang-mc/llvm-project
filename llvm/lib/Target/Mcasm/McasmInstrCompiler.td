@@ -51,6 +51,10 @@ def ADJCALLSTACKUP32   : I<0, Pseudo, (outs), (ins i32imm:$amt1, i32imm:$amt2),
 def : Pat<(Mcasmcallseq_start timm:$amt1, timm:$amt2),
        (ADJCALLSTACKDOWN32 i32imm:$amt1, i32imm:$amt2, 0)>, Requires<[NotLP64]>;
 
+def FRAMEADDR32 : I<0, Pseudo, (outs GR32:$dst),
+                    (ins i32imm:$fi, i32imm:$offset),
+                    "#FRAMEADDR32", []>;
+
 
 // MCASM NOTE: 64-bit not supported
 // // ADJCALLSTACKDOWN/UP implicitly use/def RSP because they may be expanded into

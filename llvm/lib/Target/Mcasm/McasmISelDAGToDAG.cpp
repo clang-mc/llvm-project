@@ -119,6 +119,28 @@ void McasmDAGToDAGISel::Select(SDNode *N) {
     return;
   }
 
+  auto selectFrameAddr = [&](FrameIndexSDNode *FI, int64_t Off,
+                             const SDLoc &DL) -> SDNode * {
+    SDValue TFI = CurDAG->getTargetFrameIndex(FI->getIndex(), MVT::i32);
+    SDValue Imm = CurDAG->getTargetConstant(Off, DL, MVT::i32);
+    return CurDAG->getMachineNode(Mcasm::FRAMEADDR32, DL, MVT::i32, TFI, Imm);
+  };
+
+  if (N->getOpcode() == ISD::ADD) {
+    SDValue L = N->getOperand(0);
+    SDValue R = N->getOperand(1);
+    auto *FI = dyn_cast<FrameIndexSDNode>(L);
+    auto *C = dyn_cast<ConstantSDNode>(R);
+    if (!FI) {
+      FI = dyn_cast<FrameIndexSDNode>(R);
+      C = dyn_cast<ConstantSDNode>(L);
+    }
+    if (FI && C) {
+      ReplaceNode(N, selectFrameAddr(FI, C->getSExtValue(), SDLoc(N)));
+      return;
+    }
+  }
+
   // Materialize FrameIndex values as concrete frame addresses when they flow as
   // SSA values (e.g. PHI/select of alloca pointers). Keep pure load/store
   // address uses as FrameIndex so normal FI elimination handles them.
@@ -143,22 +165,7 @@ void McasmDAGToDAGISel::Select(SDNode *N) {
       return;
     }
 
-    MachineFunction &MF = CurDAG->getMachineFunction();
-    const auto *TFI = static_cast<const McasmFrameLowering *>(
-        MF.getSubtarget().getFrameLowering());
-    Register FrameReg;
-    StackOffset Offset =
-        TFI->getFrameIndexReference(MF, FI->getIndex(), FrameReg);
-    SDLoc DL(N);
-    SDValue Base = CurDAG->getRegister(FrameReg, MVT::i32);
-    int64_t Off = Offset.getFixed();
-    if (Off == 0) {
-      ReplaceNode(N, Base.getNode());
-      return;
-    }
-    SDValue Imm = CurDAG->getTargetConstant(Off, DL, MVT::i32);
-    SDNode *Add = CurDAG->getMachineNode(Mcasm::ADD32ri, DL, MVT::i32, Base, Imm);
-    ReplaceNode(N, Add);
+    ReplaceNode(N, selectFrameAddr(FI, 0, SDLoc(N)));
     return;
   }
 

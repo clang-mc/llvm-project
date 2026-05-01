@@ -96,6 +96,23 @@ bool McasmRegisterInfo::eliminateFrameIndex(MachineBasicBlock::iterator II,
 
   int64_t ByteOffset = Offset.getFixed();
 
+  if (MI.getOpcode() == Mcasm::FRAMEADDR32) {
+    MachineBasicBlock &MBB = *MI.getParent();
+    const McasmInstrInfo *TII = MF.getSubtarget<McasmSubtarget>().getInstrInfo();
+    DebugLoc DL = MI.getDebugLoc();
+    Register DstReg = MI.getOperand(0).getReg();
+    int64_t ExtraOffset = MI.getOperand(FIOperandNum + 1).getImm();
+    int64_t FinalOffset = ByteOffset + ExtraOffset;
+
+    BuildMI(MBB, II, DL, TII->get(Mcasm::MOV32rr), DstReg).addReg(FrameReg);
+    if (FinalOffset != 0)
+      BuildMI(MBB, II, DL, TII->get(Mcasm::ADD32ri), DstReg)
+          .addReg(DstReg)
+          .addImm(FinalOffset);
+    MI.eraseFromParent();
+    return true;
+  }
+
   // Check if this is an ALU instruction (like ADD) with FrameIndex as source
   // Memory operands have format: [BaseReg + Scale*IndexReg + Disp + Segment]
   // This requires 5 operands starting from FIOperandNum

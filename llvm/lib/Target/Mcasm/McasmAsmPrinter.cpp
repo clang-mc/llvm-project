@@ -531,7 +531,7 @@ bool McasmAsmPrinter::emitMcasmInlineAsmWrapper(const MachineInstr *MI) {
     InlineAsmHelpers.push_back({Label, HelperBody, HelperBody});
   }
 
-  std::string Init = "inline data modify storage std:vm s0 set value {";
+  std::string Init = "inline data modify storage std:vm ls0 set value {";
   for (unsigned I = 0; I < RegInputVals.size(); ++I) {
     if (I)
       Init += ", ";
@@ -547,14 +547,14 @@ bool McasmAsmPrinter::emitMcasmInlineAsmWrapper(const MachineInstr *MI) {
     std::string Reg = McasmInstPrinter::getRegisterName(MO.getReg());
     std::string Field = RegInputFieldByVal.lookup(Val);
     std::string Line =
-        (Twine("inline execute store result storage std:vm s0.") + Field +
+        (Twine("inline execute store result storage std:vm ls0.") + Field +
          " int 1 run scoreboard players get " + Reg + " vm_regs")
             .str();
     OutStreamer->emitRawText("\t" + Line);
   }
 
   OutStreamer->emitRawText(
-      (Twine("\tinline function ") + Label + " with storage std:vm s0").str());
+      (Twine("\tinline function ") + Label + " with storage std:vm ls0").str());
   return true;
 }
 
