@@ -213,7 +213,9 @@ let isCall = 1 in
   // a use to prevent stack-pointer assignments that appear immediately
   // before calls from potentially appearing dead. Uses for argument
   // registers are added manually.
-  let Uses = [ESP, SSP], Defs = [rax, t0] in {
+  let Uses = [ESP, SSP],
+      Defs = [r0, r1, r2, r3, r4, r5, r6, r7,
+              t0, t1, t2, t3, t4, t5, t6, t7, rax] in {
     def CALLpcrel32 : Ii32PCRel<0xE8, RawFrm,
                            (outs), (ins i32imm_brtarget:$dst),
                            "call{l}\t$dst", []>,
@@ -325,7 +327,9 @@ let isCall = 1, isTerminator = 1, isReturn = 1, isBranch = 1,
 // RSP is marked as a use to prevent stack-pointer assignments that appear
 // immediately before calls from potentially appearing dead. Uses for argument
 // registers are added manually.
-let isCall = 1, Uses = [RSP, SSP] in {
+let isCall = 1, Uses = [RSP, SSP],
+    Defs = [r0, r1, r2, r3, r4, r5, r6, r7,
+            t0, t1, t2, t3, t4, t5, t6, t7, rax] in {
   // NOTE: this pattern doesn't match "Mcasmcall imm", because we do not know
   // that the offset between an arbitrary immediate and the call will fit in
   // the 32-bit pcrel field that we have.
@@ -404,6 +408,8 @@ let isCall = 1, isTerminator = 1, isReturn = 1, isBarrier = 1,
 
 let isPseudo = 1, isCall = 1, isCodeGenOnly = 1,
     Uses = [RSP, SSP],
+    Defs = [r0, r1, r2, r3, r4, r5, r6, r7,
+            t0, t1, t2, t3, t4, t5, t6, t7, rax],
     usesCustomInserter = 1,
     in {
   def INDIRECT_THUNK_CALL32 :
@@ -425,6 +431,8 @@ let isPseudo = 1, isCall = 1, isCodeGenOnly = 1,
 
 let isPseudo = 1, isCall = 1, isCodeGenOnly = 1,
     Uses = [RSP, SSP],
+    Defs = [r0, r1, r2, r3, r4, r5, r6, r7,
+            t0, t1, t2, t3, t4, t5, t6, t7, rax],
     in {
   def CALL64m_RVMARKER :
      PseudoI<(outs), (ins i64imm:$rvfunc, i64mem:$dst), [(Mcasmcall_rvmarker tglobaladdr:$rvfunc, (loadi64 addr:$dst))]>,
