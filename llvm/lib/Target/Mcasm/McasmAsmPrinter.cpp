@@ -299,86 +299,125 @@ static void appendMcasmInitBits(const APInt &Bits, uint64_t StorageBits,
   }
 }
 
-static void appendZeroBytes(SmallVectorImpl<uint8_t> &Bytes, uint64_t Count) {
-  Bytes.append(Count, 0);
+static void ensureMcasmInitSlot(SmallVectorImpl<uint32_t> &Slots,
+                                uint64_t Offset) {
+  if (Slots.size() <= Offset)
+    Slots.resize(Offset + 1, 0);
 }
 
-static void appendBitsAsBytes(const APInt &Bits, uint64_t StorageBits,
-                              SmallVectorImpl<uint8_t> &Bytes) {
+static void ensureMcasmInitRange(SmallVectorImpl<uint32_t> &Slots,
+                                 uint64_t Offset, uint64_t Size) {
+  if (Size == 0)
+    Size = 1;
+  ensureMcasmInitSlot(Slots, Offset + Size - 1);
+}
+
+static void writeBitsToMcasmSlots(const APInt &Bits, uint64_t StorageBits,
+                                  SmallVectorImpl<uint32_t> &Slots,
+                                  uint64_t Offset) {
   uint64_t NumBytes = std::max<uint64_t>(1, divideCeil(StorageBits, 8ULL));
   APInt Padded = Bits.zextOrTrunc(NumBytes * 8);
-  for (uint64_t I = 0; I != NumBytes; ++I)
-    Bytes.push_back(Padded.lshr(I * 8).trunc(8).getZExtValue());
+  for (uint64_t I = 0; I < NumBytes; I += 4) {
+    uint32_t Word = 0;
+    for (unsigned Byte = 0; Byte != 4 && I + Byte < NumBytes; ++Byte)
+      Word |= Padded.lshr((I + Byte) * 8).trunc(8).getZExtValue()
+              << (Byte * 8);
+    Slots[Offset + I] = Word;
+  }
+}
+
+static bool collectMcasmFunctionPointerInit(
+    const Constant *C, uint64_t Offset, McasmAsmPrinter &AP,
+    SmallVectorImpl<McasmRuntimeStaticInitEntry> &Entries) {
+  const auto *Stripped = C->stripPointerCasts();
+  const auto *GV = dyn_cast<GlobalValue>(Stripped);
+  if (!GV || !isa<Function>(GV))
+    return false;
+
+  Entries.push_back(
+      {Offset, AP.getSymbol(GV)->getName().str()});
+  return true;
 }
 
 static void serializeMcasmInitializer(const Constant *C, const DataLayout &DL,
-                                      SmallVectorImpl<uint8_t> &Bytes) {
+                                      SmallVectorImpl<uint32_t> &Slots,
+                                      uint64_t Offset, McasmAsmPrinter &AP,
+                                      SmallVectorImpl<McasmRuntimeStaticInitEntry> &Entries) {
   Type *Ty = C->getType();
+  uint64_t AllocSize = DL.getTypeAllocSize(Ty).getFixedValue();
+  ensureMcasmInitRange(Slots, Offset, AllocSize);
 
   if (isa<UndefValue>(C) || isa<ConstantAggregateZero>(C) || C->isNullValue()) {
-    appendZeroBytes(Bytes, DL.getTypeAllocSize(Ty).getFixedValue());
     return;
   }
 
   if (const auto *CI = dyn_cast<ConstantInt>(C)) {
-    appendBitsAsBytes(CI->getValue(), DL.getTypeStoreSizeInBits(Ty), Bytes);
+    writeBitsToMcasmSlots(CI->getValue(), DL.getTypeStoreSizeInBits(Ty), Slots,
+                          Offset);
     return;
   }
 
   if (const auto *CFP = dyn_cast<ConstantFP>(C)) {
-    appendBitsAsBytes(CFP->getValueAPF().bitcastToAPInt(),
-                      DL.getTypeStoreSizeInBits(Ty), Bytes);
+    writeBitsToMcasmSlots(CFP->getValueAPF().bitcastToAPInt(),
+                          DL.getTypeStoreSizeInBits(Ty), Slots, Offset);
+    return;
+  }
+
+  if (collectMcasmFunctionPointerInit(C, Offset, AP, Entries)) {
     return;
   }
 
   if (const auto *CDS = dyn_cast<ConstantDataSequential>(C)) {
+    uint64_t ElementSize =
+        DL.getTypeAllocSize(CDS->getElementType()).getFixedValue();
     for (unsigned I = 0, E = CDS->getNumElements(); I != E; ++I)
-      serializeMcasmInitializer(CDS->getElementAsConstant(I), DL, Bytes);
+      serializeMcasmInitializer(CDS->getElementAsConstant(I), DL, Slots,
+                                Offset + I * ElementSize, AP, Entries);
     return;
   }
 
   if (const auto *CA = dyn_cast<ConstantArray>(C)) {
-    for (const Use &Op : CA->operands())
-      serializeMcasmInitializer(cast<Constant>(Op.get()), DL, Bytes);
+    uint64_t ElementSize =
+        DL.getTypeAllocSize(CA->getType()->getElementType()).getFixedValue();
+    for (unsigned I = 0, E = CA->getNumOperands(); I != E; ++I)
+      serializeMcasmInitializer(cast<Constant>(CA->getOperand(I)), DL, Slots,
+                                Offset + I * ElementSize, AP, Entries);
     return;
   }
 
   if (const auto *CS = dyn_cast<ConstantStruct>(C)) {
     const StructLayout *SL = DL.getStructLayout(CS->getType());
-    uint64_t Start = Bytes.size();
-    appendZeroBytes(Bytes, SL->getSizeInBytes().getFixedValue());
     for (unsigned I = 0, E = CS->getNumOperands(); I != E; ++I) {
-      SmallVector<uint8_t, 16> FieldBytes;
       serializeMcasmInitializer(cast<Constant>(CS->getOperand(I)), DL,
-                                FieldBytes);
-      uint64_t Offset = SL->getElementOffset(I);
-      llvm::copy(FieldBytes, Bytes.begin() + Start + Offset);
+                                Slots, Offset + SL->getElementOffset(I), AP,
+                                Entries);
     }
     return;
   }
 
   if (const auto *CV = dyn_cast<ConstantVector>(C)) {
-    for (const Use &Op : CV->operands())
-      serializeMcasmInitializer(cast<Constant>(Op.get()), DL, Bytes);
+    uint64_t ElementSize =
+        DL.getTypeAllocSize(CV->getType()->getElementType()).getFixedValue();
+    for (unsigned I = 0, E = CV->getNumOperands(); I != E; ++I)
+      serializeMcasmInitializer(cast<Constant>(CV->getOperand(I)), DL, Slots,
+                                Offset + I * ElementSize, AP, Entries);
     return;
   }
-
-  appendZeroBytes(Bytes, DL.getTypeAllocSize(Ty).getFixedValue());
 }
 
-static void appendMcasmInitializer(const Constant *C, const DataLayout &DL,
-                                   std::string &Output, bool &NeedComma) {
-  SmallVector<uint8_t, 64> Bytes;
-  serializeMcasmInitializer(C, DL, Bytes);
-  if (Bytes.empty())
-    Bytes.push_back(0);
+static SmallVector<McasmRuntimeStaticInitEntry, 4>
+appendMcasmInitializer(const Constant *C, const DataLayout &DL,
+                      std::string &Output, bool &NeedComma,
+                      McasmAsmPrinter &AP) {
+  SmallVector<uint32_t, 64> Slots;
+  SmallVector<McasmRuntimeStaticInitEntry, 4> Entries;
+  serializeMcasmInitializer(C, DL, Slots, 0, AP, Entries);
+  if (Slots.empty())
+    Slots.push_back(0);
 
-  for (size_t I = 0; I < Bytes.size(); I += 4) {
-    uint32_t Word = 0;
-    for (unsigned Byte = 0; Byte != 4 && I + Byte < Bytes.size(); ++Byte)
-      Word |= static_cast<uint32_t>(Bytes[I + Byte]) << (Byte * 8);
-    appendMcasmInitWord(Output, NeedComma, Word);
-  }
+  for (uint32_t Slot : Slots)
+    appendMcasmInitWord(Output, NeedComma, Slot);
+  return Entries;
 }
 
 McasmAsmPrinter::McasmAsmPrinter(TargetMachine &TM,
@@ -392,6 +431,19 @@ void McasmAsmPrinter::emitStartOfAsmFile(Module &M) {
   InlineAsmHelpers.clear();
   InlineAsmHelperIndexByKey.clear();
   InlineAsmCounter.clear();
+  RuntimeStaticInits.clear();
+  for (const GlobalVariable &GV : M.globals()) {
+    if (!GV.hasInitializer())
+      continue;
+    std::string Scratch;
+    bool NeedComma = false;
+    auto RuntimeEntries =
+        appendMcasmInitializer(GV.getInitializer(), M.getDataLayout(), Scratch,
+                               NeedComma, *this);
+    if (RuntimeEntries.empty())
+      continue;
+    RuntimeStaticInits.push_back({&GV, std::move(RuntimeEntries)});
+  }
   // mcasm requires #include "_ll_std" at the start of every file
   OutStreamer->emitRawText("#include \"_ll_std\"");
   if (M.getModuleFlag("mcasm-libc-include"))
@@ -399,7 +451,8 @@ void McasmAsmPrinter::emitStartOfAsmFile(Module &M) {
   bool HasMainDefinition = llvm::any_of(M, [](const Function &F) {
     return !F.isDeclaration() && F.getName() == "main";
   });
-  if (HasMainDefinition)
+  bool NeedCustomStart = HasMainDefinition && !RuntimeStaticInits.empty();
+  if (HasMainDefinition && !NeedCustomStart)
     OutStreamer->emitRawText("#include \"_ll_crt\"");
   OutStreamer->emitRawText("");  // Blank line
 
@@ -446,6 +499,39 @@ void McasmAsmPrinter::emitStartOfAsmFile(Module &M) {
         return F.isDeclaration() && F.hasDLLImportStorageClass();
       })) {
     OutStreamer->emitRawText("");  // Blank line after extern declarations
+  }
+
+  if (NeedCustomStart) {
+    OutStreamer->emitRawText("// -- Begin function _start");
+    OutStreamer->emitRawText("_start:                                 // @_start");
+    OutStreamer->emitRawText("// %bb.0:");
+    for (const McasmRuntimeStaticInitRecord &Record : RuntimeStaticInits) {
+      OutStreamer->emitRawText(
+          (Twine("\tmov\tr0, ") + getSymbol(Record.GV)->getName()).str());
+      for (const McasmRuntimeStaticInitEntry &Entry : Record.Entries) {
+        std::string Dest = "[r0]";
+        if (Entry.Offset != 0)
+          Dest = (Twine("[r0+") + Twine(Entry.Offset) + "]").str();
+        OutStreamer->emitRawText(
+            (Twine("\tmovd\t") + Dest + ", " + Entry.Target).str());
+      }
+    }
+    OutStreamer->emitRawText("\tmov\tr0, 0");
+    OutStreamer->emitRawText("\tmov\tr1, 0");
+    OutStreamer->emitRawText("\tcall\tmain");
+    OutStreamer->emitRawText(
+        "\tinline data modify storage std:vm ls0 set value {a: -1}");
+    OutStreamer->emitRawText(
+        "\tinline execute store result storage std:vm ls0.a int 1 run "
+        "scoreboard players get rax vm_regs");
+    OutStreamer->emitRawText(
+        "\tinline function _ll_shared:z/_start_0 with storage std:vm ls0");
+    OutStreamer->emitRawText("// -- End function");
+    OutStreamer->emitRawText("");
+    OutStreamer->emitRawText("export _ll_shared:z/_start_0:");
+    OutStreamer->emitRawText("    inline $return $(a)");
+    OutStreamer->emitRawText("\tret");
+    OutStreamer->emitRawText("");
   }
 
   MCASM_DEBUG_LOG("DEBUG: McasmAsmPrinter::emitStartOfAsmFile completed\n");
@@ -647,11 +733,6 @@ void McasmAsmPrinter::emitLinkage(const GlobalValue *GV, MCSymbol *Sym) const {
   // So this function is intentionally empty
 }
 
-void McasmAsmPrinter::emitFunctionBodyStart() {
-  // mcasm doesn't need CFI directives (.cfi_startproc)
-  // Override to prevent base class from emitting them
-}
-
 void McasmAsmPrinter::emitFunctionBodyEnd() {
   // mcasm doesn't need CFI directives (.cfi_endproc) or .size directives
   // Override to prevent base class from emitting them
@@ -759,8 +840,9 @@ void McasmAsmPrinter::emitGlobalVariable(const GlobalVariable *GV) {
 
   const Constant *C = GV->getInitializer();
   bool NeedComma = false;
-  appendMcasmInitializer(C, GV->getParent()->getDataLayout(), Output,
-                         NeedComma);
+  auto RuntimeEntries =
+      appendMcasmInitializer(C, GV->getParent()->getDataLayout(), Output,
+                             NeedComma, *this);
 
   Output += "]";
   OutStreamer->emitRawText(Output);

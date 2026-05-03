@@ -11,7 +11,7 @@ entry:
   ret i32 %v
 }
 
-; CHECK: static and4 [1, 2, 3]
-; CHECK: static zeros [0, 0, 0, 0]
-; CHECK: static nested [524295, 9, 10, 11]
-; CHECK: static undefs [0]
+; CHECK: static and4 [1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0]
+; CHECK: static zeros [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+; CHECK: static nested [7, 0, 8, 0, 9, 0, 0, 0, 10, 0, 0, 0, 11, 0, 0, 0]
+; CHECK: static undefs [0, 0, 0, 0]

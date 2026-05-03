@@ -57,6 +57,6 @@ entry:
 ; CHECK-NOT: sub rsp
 
 ; CHECK-LABEL: vla_call:
-; CHECK: mov t1, rsp
+; CHECK: mov [[SAVED:x[0-9]+]], rsp
 ; CHECK: call{{.*}} callee
-; CHECK: mov rsp, t1
+; CHECK: mov rsp, [[SAVED]]

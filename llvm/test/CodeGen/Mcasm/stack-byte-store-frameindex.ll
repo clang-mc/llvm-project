@@ -23,8 +23,8 @@ define i32 @main() #0 {
 attributes #0 = { noinline nounwind optnone }
 
 ; CHECK-LABEL: main:
-; CHECK:      sub rsp, 112
-; CHECK:      add [[CAP:r[0-9]+]], 36
+; CHECK:      sub rsp,
+; CHECK:      add [[CAP:r[0-9]+]], 12
 ; CHECK:      mov {{.*}}, [[CAP]]
 ; CHECK:      mov {{\[}}[[CAP]]{{\]}}, 64
 ; CHECK:      mov rax, [{{.*}}]

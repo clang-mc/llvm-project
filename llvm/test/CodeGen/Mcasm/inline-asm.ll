@@ -7,8 +7,8 @@ entry:
 }
 
 ; WRAP-LABEL: ir_inline_input_only:
-; WRAP: inline data modify storage std:vm s0 set value {a: -1}
-; WRAP: inline execute store result storage std:vm s0.a int 1 run scoreboard players get
-; WRAP: inline function _ll_shared:z/ir_inline_input_only_0 with storage std:vm s0
+; WRAP: inline data modify storage std:vm [[S:ls[0-9]+]] set value {a: -1}
+; WRAP: inline execute store result storage std:vm [[S]].a int 1 run scoreboard players get
+; WRAP: inline function _ll_shared:z/ir_inline_input_only_0 with storage std:vm [[S]]
 ; WRAP: export _ll_shared:z/ir_inline_input_only_0:
 ; WRAP: inline $return $(a)

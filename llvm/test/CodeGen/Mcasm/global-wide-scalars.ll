@@ -61,9 +61,9 @@ entry:
 ; CHECK: add {{.*}}, 8
 ; CHECK: mov t0, [{{.*}}]
 
-; CHECK: static wide [0, 16777216]
-; CHECK: static neg [-1, -1]
-; CHECK: static wide_zeros [0, 0, 0, 0]
-; CHECK: static wide_array [1, 0, 0, 16777216]
-; CHECK: static mixed [5, 0, 16777216, 9]
-; CHECK: static one [0, 1072693248]
+; CHECK: static wide [0, 0, 0, 0, 16777216, 0, 0, 0]
+; CHECK: static neg [-1, 0, 0, 0, -1, 0, 0, 0]
+; CHECK: static wide_zeros [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+; CHECK: static wide_array [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16777216, 0, 0, 0]
+; CHECK: static mixed [5, 0, 0, 0, 0, 0, 0, 0, 16777216, 0, 0, 0, 9, 0, 0, 0]
+; CHECK: static one [0, 0, 0, 0, 1072693248, 0, 0, 0]

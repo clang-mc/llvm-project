@@ -146,16 +146,11 @@ static Value *matchBitTrickAbs(Instruction &I) {
 }
 
 static Value *getWordBasePtr(IRBuilder<> &B, Value *Ptr, Type *IntPtrTy) {
-  Value *PtrInt = B.CreatePtrToInt(Ptr, IntPtrTy, "mcasm.ptrint");
-  Value *WordInt =
-      B.CreateAnd(PtrInt, ConstantInt::get(IntPtrTy, ~uint64_t(3)),
-                  "mcasm.wordbase");
-  return B.CreateIntToPtr(WordInt, Ptr->getType(), "mcasm.wordptr");
+  return Ptr;
 }
 
 static Value *getByteLane(IRBuilder<> &B, Value *Ptr, Type *IntPtrTy) {
-  Value *PtrInt = B.CreatePtrToInt(Ptr, IntPtrTy, "mcasm.ptrint");
-  return B.CreateAnd(PtrInt, ConstantInt::get(IntPtrTy, 3), "mcasm.lane");
+  return ConstantInt::get(IntPtrTy, 0);
 }
 
 static Value *getBitShift(IRBuilder<> &B, Value *Lane, Type *IntPtrTy,

@@ -11,9 +11,9 @@ entry:
 
 ; PLAIN-LABEL: main:
 ; PLAIN: mov{{.*}} and4
-; PLAIN: static and4 [1, 2, 3, 4, 5, 6, 7, 8]
+; PLAIN: static and4 [1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4, 0, 0, 0, 5, 0, 0, 0, 6, 0, 0, 0, 7, 0, 0, 0, 8, 0, 0, 0]
 
 ; HIDE-LABEL: main:
 ; HIDE: mov{{.*}} [[HIDDEN:mcasm_static_[0-9a-f]+]]
-; HIDE: static [[HIDDEN]] [1, 2, 3, 4, 5, 6, 7, 8]
+; HIDE: static [[HIDDEN]] [1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4, 0, 0, 0, 5, 0, 0, 0, 6, 0, 0, 0, 7, 0, 0, 0, 8, 0, 0, 0]
 ; HIDE-NOT: static and4 [

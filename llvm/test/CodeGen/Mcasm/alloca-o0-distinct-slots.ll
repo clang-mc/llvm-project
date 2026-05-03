@@ -31,10 +31,10 @@ exit:
 
 ; CHECK-LABEL: store_loop:
 ; CHECK: sub rsp,
-; CHECK-DAG: mov [rsp+2], 0
-; CHECK-DAG: mov [rsp+1], 1
-; CHECK: mov r0, [rsp+1]
-; CHECK: mov r1, [rsp+2]
-; CHECK: mov [rsp+2], r1
-; CHECK: mov [rsp+1], r0
-; CHECK: mov r1, [rsp+2]
+; CHECK-DAG: mov [rsp+8], 0
+; CHECK-DAG: mov [rsp+4], 1
+; CHECK: mov r0, [rsp+4]
+; CHECK: mov r1, [rsp+8]
+; CHECK: mov [rsp+8], r1
+; CHECK: mov [rsp+4], r0
+; CHECK: mov r1, [rsp+8]

@@ -55,16 +55,13 @@ static SDValue getAddressUnitSize(SDLoc DL, SelectionDAG &DAG, EVT PtrVT) {
 
 static SDValue lowerPointerToWordAddress(SDValue Ptr, SDLoc DL,
                                          SelectionDAG &DAG) {
-  EVT PtrVT = Ptr.getValueType();
-  return DAG.getNode(ISD::SRL, DL, PtrVT, Ptr,
-                     DAG.getConstant(2, DL, PtrVT));
+  return Ptr;
 }
 
 static SDValue lowerPointerByteLane(SDValue Ptr, SDLoc DL,
                                     SelectionDAG &DAG) {
   EVT PtrVT = Ptr.getValueType();
-  return DAG.getNode(ISD::AND, DL, PtrVT, Ptr,
-                     DAG.getConstant(3, DL, PtrVT));
+  return DAG.getConstant(0, DL, PtrVT);
 }
 
 static SDValue lowerPointerBitShiftAmount(SDValue Lane, SDLoc DL,
@@ -1410,17 +1407,7 @@ SDValue McasmTargetLowering::lowerVASTART(SDValue Op,
   int VarArgsFI = FuncInfo->getVarArgsFrameIndex();
   if (!MFI.isFixedObjectIndex(VarArgsFI))
     report_fatal_error("mcasm: varargs frame index is not initialized");
-  const auto *TFI = static_cast<const McasmFrameLowering *>(
-      MF.getSubtarget().getFrameLowering());
-  Register FrameReg;
-  StackOffset Offset = TFI->getFrameIndexReference(MF, VarArgsFI, FrameReg);
-
-  SDValue VarArgsAddr = DAG.getRegister(FrameReg, PtrVT);
-  int64_t FixedOff = Offset.getFixed();
-  if (FixedOff != 0) {
-    VarArgsAddr = DAG.getNode(ISD::ADD, DL, PtrVT, VarArgsAddr,
-                              DAG.getConstant(FixedOff, DL, PtrVT));
-  }
+  SDValue VarArgsAddr = DAG.getFrameIndex(VarArgsFI, PtrVT);
 
   // vastart stores the address of the first vararg slot into the va_list.
   const Value *SV = nullptr;
@@ -1650,8 +1637,11 @@ SDValue McasmTargetLowering::lowerBR_CC(SDValue Op, SelectionDAG &DAG) const {
 
 // Lower SETCC to branchless arithmetic (mcasm has no SETcc instruction).
 //
-// Core primitive: SETULT(a, b) = ((a - b) >> 31) & 1
-//   Unsigned subtraction wraps; if a < b (unsigned), the result has bit 31 set.
+// Core primitive: SETULT(a, b) = borrow-out of (a - b)
+//   For 32-bit two's-complement arithmetic, the unsigned borrow bit is:
+//     (((~a) & b) | (~(a ^ b) & (a - b))) >> 31
+//   This is equivalent to a <u b and stays valid for cases such as
+//   0xffffffff < 1, where the sign bit of (a - b) alone would be wrong.
 //
 // Signed comparisons are reduced to unsigned via MSB flip:
 //   SETLT(a,b) = SETULT(a^0x80000000, b^0x80000000)
@@ -1845,10 +1835,17 @@ SDValue McasmTargetLowering::lowerSETCC(SDValue Op, SelectionDAG &DAG) const {
   SDValue MSB  = DAG.getConstant(0x80000000U, DL, MVT::i32);
   SDValue AllF = DAG.getConstant(0xFFFFFFFFU, DL, MVT::i32);
 
-  // branchless SETULT: ((A - B) >> 31) & 1
+  // branchless SETULT using the borrow-out bit of A - B:
+  //   borrow = (((~A) & B) | (~(A ^ B) & (A - B))) >> 31
   auto setult = [&](SDValue A, SDValue B) -> SDValue {
     SDValue Sub = DAG.getNode(ISD::SUB, DL, MVT::i32, A, B);
-    SDValue Shr = DAG.getNode(ISD::SRL, DL, MVT::i32, Sub, C31);
+    SDValue NotA = DAG.getNode(ISD::XOR, DL, MVT::i32, A, AllF);
+    SDValue AxorB = DAG.getNode(ISD::XOR, DL, MVT::i32, A, B);
+    SDValue NotAxorB = DAG.getNode(ISD::XOR, DL, MVT::i32, AxorB, AllF);
+    SDValue T0 = DAG.getNode(ISD::AND, DL, MVT::i32, NotA, B);
+    SDValue T1 = DAG.getNode(ISD::AND, DL, MVT::i32, NotAxorB, Sub);
+    SDValue BorrowBits = DAG.getNode(ISD::OR, DL, MVT::i32, T0, T1);
+    SDValue Shr = DAG.getNode(ISD::SRL, DL, MVT::i32, BorrowBits, C31);
     return DAG.getNode(ISD::AND, DL, MVT::i32, Shr, C1);
   };
   // flip the MSB (sign bit) to convert signed ordering to unsigned

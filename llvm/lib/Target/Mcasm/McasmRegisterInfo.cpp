@@ -158,14 +158,15 @@ bool McasmRegisterInfo::eliminateFrameIndex(MachineBasicBlock::iterator II,
     return false;
   }
 
-  int64_t McasmOffset = ByteOffset / 4;
-  assert(ByteOffset % 4 == 0 &&
-         "byte-semantic frame offset reached direct word memory operand");
+  int64_t McasmOffset = ByteOffset;
 
   // Normal memory operand case
-  // Replace FrameIndex with FrameReg + McasmOffset
+  // Replace FrameIndex with FrameReg + McasmOffset.
   // The instruction format is: [BaseReg + Scale*IndexReg + Disp + Segment]
-  // For mcasm: [rsp + 0*0 + McasmOffset + 0]
+  // clang-mc's Ptr lowering uses the displacement directly as a heap slot
+  // offset, so keep the frame offset in byte/slot units here. Dividing by 4
+  // would make direct frame accesses disagree with materialized frame
+  // addresses such as FRAMEADDR32.
   MCASM_DEBUG_LOG("DEBUG eliminateFrameIndex: Normal memory operand case\n");
   MCASM_DEBUG_LOG("DEBUG eliminateFrameIndex: About to replace with FrameReg=%u, McasmOffset=%lld\n",
           FrameReg.id(), (long long)McasmOffset);

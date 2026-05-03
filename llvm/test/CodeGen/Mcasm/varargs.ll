@@ -60,21 +60,24 @@ entry:
 
 ; CHECK-LABEL: sum_first_two:
 ; CHECK: sub rsp, 32
-; CHECK: mov [rsp+1], r1
-; CHECK: mov [rsp+7], r0
+; CHECK: add r0, 12
+; CHECK: mov [rsp+4], rax
+; CHECK: mov [rsp+28], r0
 ; CHECK-LABEL: read_i64:
 ; CHECK: sub rsp, 32
-; CHECK: mov [rsp+1], r1
-; CHECK: mov [rsp+7], r0
+; CHECK: add r0, 8
+; CHECK: mov [rsp+4], rax
+; CHECK: mov [rsp+28], r0
 ; CHECK-LABEL: copy_and_read:
 ; CHECK: sub rsp, 36
-; CHECK: mov [rsp+8], rsp
-; CHECK: mov [rsp+7], r0
+; CHECK: add r1, 8
+; CHECK: mov [rsp+32], r1
+; CHECK: mov [rsp+28], r0
 ; CHECK-LABEL: stack_vararg_after_8_regs:
 ; CHECK: sub rsp, 4
-; CHECK: add r0, 4
+; CHECK: add r0, 8
 ; CHECK: mov [rsp], r0
-; CHECK: mov rax, [rsp]
+; CHECK: mov rax, [rsp+4]
 ; CHECK-LABEL: vararg_call_shadow:
 ; CHECK: sub rsp, 12
 ; CHECK: add r0, 8

@@ -32,6 +32,11 @@ public:
     // Mcasm preserves C byte semantics in IR/object layout even though the
     // backend can only directly issue 32-bit word memory operations.
     // Sub-word loads/stores are lowered later as read-modify-write sequences.
+    //
+    // Keep the preprocessor view aligned with the LLVM datalayout: mcasm uses
+    // little-endian object layout, so compiler-rt and system headers must see
+    // little-endian predefined macros as well.
+    BigEndian = false;
     resetDataLayout("e-p:32:32-i8:8:8-i16:16:16-i32:32:32-i64:32-f32:32-f64:32-a:0:32-n32");
 
     // Mcasm uses 8 parameter registers (r0-r7)

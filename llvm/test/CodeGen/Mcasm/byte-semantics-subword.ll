@@ -37,25 +37,27 @@ entry:
 ; CHECK-LABEL: load_byte_1:
 ; CHECK: mov [[B:r[0-9]+]], bytes
 ; CHECK: add [[B]], 1
+; CHECK-NOT: __bit_shr
 ; CHECK-NOT: bytes+
 
 ; CHECK-LABEL: load_half_1:
 ; CHECK: mov [[H:r[0-9]+]], halves
 ; CHECK: add [[H]], 2
+; CHECK-NOT: __bit_shr
 ; CHECK-NOT: halves+
 
 ; CHECK-LABEL: store_byte_1:
-; CHECK: mov [[SB:r[0-9]+]], bytes
+; CHECK: mov [[SB:[rx][0-9]+]], bytes
 ; CHECK: add [[SB]], 1
 ; CHECK: mov
-; CHECK: mov [{{r[0-9]+}}], rax
+; CHECK: mov [{{[rx][0-9]+}}], rax
 
 ; CHECK-LABEL: store_half_1:
-; CHECK: mov [[SH:r[0-9]+]], halves
+; CHECK: mov [[SH:[rx][0-9]+]], halves
 ; CHECK: add [[SH]], 2
 ; CHECK: mov
-; CHECK: mov [{{r[0-9]+}}], rax
+; CHECK: mov [{{[rx][0-9]+}}], rax
 
-; CHECK: static bytes [1145258561]
-; CHECK: static halves [131073, 262147]
-; CHECK: static mix [33751041, 4]
+; CHECK: static bytes [65, 66, 67, 68]
+; CHECK: static halves [1, 0, 2, 0, 3, 0, 4, 0]
+; CHECK: static mix [1, 0, 515, 0, 4, 0]

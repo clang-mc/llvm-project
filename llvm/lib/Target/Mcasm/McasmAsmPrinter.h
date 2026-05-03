@@ -16,11 +16,11 @@
 #ifndef LLVM_LIB_TARGET_MCASM_MCASMASMPRINTER_H
 #define LLVM_LIB_TARGET_MCASM_MCASMASMPRINTER_H
 
-#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/CodeGen/AsmPrinter.h"
+#include <string>
 
 namespace llvm {
 
@@ -29,6 +29,17 @@ class McasmSubtarget;
 class McasmMCInstLower;
 class GlobalAlias;
 class GlobalIFunc;
+class GlobalVariable;
+
+struct McasmRuntimeStaticInitEntry {
+  uint64_t Offset = 0;
+  std::string Target;
+};
+
+struct McasmRuntimeStaticInitRecord {
+  const GlobalVariable *GV = nullptr;
+  SmallVector<McasmRuntimeStaticInitEntry, 4> Entries;
+};
 
 class LLVM_LIBRARY_VISIBILITY McasmAsmPrinter : public AsmPrinter {
   const McasmSubtarget *Subtarget;
@@ -42,6 +53,7 @@ class LLVM_LIBRARY_VISIBILITY McasmAsmPrinter : public AsmPrinter {
   SmallVector<InlineAsmHelperRecord, 16> InlineAsmHelpers;
   StringMap<unsigned> InlineAsmHelperIndexByKey;
   SmallPtrSet<const GlobalAlias *, 16> MacroAliases;
+  SmallVector<McasmRuntimeStaticInitRecord, 16> RuntimeStaticInits;
 
 public:
   explicit McasmAsmPrinter(TargetMachine &TM,
@@ -55,7 +67,6 @@ public:
   void emitEndOfAsmFile(Module &M) override;
   void emitLinkage(const GlobalValue *GV, MCSymbol *Sym) const override;
   void emitFunctionEntryLabel() override;
-  void emitFunctionBodyStart() override;
   void emitFunctionBodyEnd() override;
   void emitInstruction(const MachineInstr *MI) override;
   void emitGlobalVariable(const GlobalVariable *GV) override;
