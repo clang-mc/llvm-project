@@ -130,6 +130,68 @@ struct InlineAsmOperandDesc {
   InlineAsm::Flag Flag = InlineAsm::Flag(0);
 };
 
+struct McasmInlineAsmOptions {
+  bool DirectArgs = false;
+};
+
+static std::string unescapeInlineAsmDollarPairs(StringRef S) {
+  std::string Out;
+  for (size_t I = 0; I < S.size(); ++I) {
+    Out.push_back(S[I]);
+    if (S[I] == '$' && I + 1 < S.size() && S[I + 1] == '$')
+      ++I;
+  }
+  return Out;
+}
+
+static std::string parseMcasmInlineAsmOptions(StringRef AsmStr,
+                                              McasmInlineAsmOptions &Options,
+                                              std::string &Err) {
+  SmallVector<StringRef, 8> Lines;
+  AsmStr.split(Lines, '\n');
+
+  std::string Out;
+  bool InOptionBlock = true;
+  for (size_t I = 0; I < Lines.size(); ++I) {
+    StringRef Line = Lines[I];
+    StringRef Trimmed = Line.trim();
+    std::string UnescapedStorage;
+    StringRef OptionLine = Trimmed;
+    if (Trimmed.starts_with("$$$$")) {
+      UnescapedStorage = unescapeInlineAsmDollarPairs(Trimmed);
+      OptionLine = UnescapedStorage;
+    }
+
+    if (InOptionBlock) {
+      if (Trimmed.empty())
+        continue;
+
+      if (OptionLine.starts_with("$$")) {
+        if (OptionLine == "$$direct_args") {
+          Options.DirectArgs = true;
+          continue;
+        }
+        Err = (Twine("unsupported mcasm inline asm option: ") + OptionLine)
+                  .str();
+        return {};
+      }
+
+      InOptionBlock = false;
+    } else if (OptionLine.starts_with("$$")) {
+      Err = (Twine("mcasm inline asm option must appear before asm body: ") +
+             OptionLine)
+                .str();
+      return {};
+    }
+
+    Out += Line.str();
+    if (I + 1 < Lines.size())
+      Out += '\n';
+  }
+
+  return Out;
+}
+
 static bool buildInlineAsmOperandDescs(const MachineInstr *MI,
                                        SmallVectorImpl<InlineAsmOperandDesc> &Descs,
                                        std::string &Err) {
@@ -592,8 +654,14 @@ bool McasmAsmPrinter::emitMcasmInlineAsmWrapper(const MachineInstr *MI) {
     report_fatal_error("mcasm inline asm wrapper: missing asm string");
   }
 
-  SmallVector<InlineAsmOperandDesc, 8> Descs;
+  McasmInlineAsmOptions Options;
   std::string Err;
+  std::string AsmBody =
+      parseMcasmInlineAsmOptions(StringRef(AsmStr), Options, Err);
+  if (!Err.empty())
+    report_fatal_error(Twine("mcasm inline asm wrapper: ") + Err);
+
+  SmallVector<InlineAsmOperandDesc, 8> Descs;
   if (!buildInlineAsmOperandDescs(MI, Descs, Err))
     report_fatal_error(Twine("mcasm inline asm wrapper: ") + Err);
 
@@ -613,8 +681,8 @@ bool McasmAsmPrinter::emitMcasmInlineAsmWrapper(const MachineInstr *MI) {
     RegInputFieldByVal.try_emplace(D.ValIndex, Field);
   }
 
-  std::string Replaced = replaceInlineAsmPlaceholders(StringRef(AsmStr), MI, Descs,
-                                                      RegInputFieldByVal, Err);
+  std::string Replaced = replaceInlineAsmPlaceholders(
+      StringRef(AsmBody), MI, Descs, RegInputFieldByVal, Err);
   if (!Err.empty())
     report_fatal_error(Twine("mcasm inline asm wrapper: ") + Err);
 
@@ -641,15 +709,17 @@ bool McasmAsmPrinter::emitMcasmInlineAsmWrapper(const MachineInstr *MI) {
     InlineAsmHelpers.push_back({Label, HelperBody, HelperBody});
   }
 
-  std::string Init = "inline data modify storage std:vm ls0 set value {";
-  for (unsigned I = 0; I < RegInputVals.size(); ++I) {
-    if (I)
-      Init += ", ";
-    Init += RegInputFieldByVal.lookup(RegInputVals[I]);
-    Init += ": -1";
+  if (!Options.DirectArgs) {
+    std::string Init = "inline data modify storage std:vm ls0 set value {";
+    for (unsigned I = 0; I < RegInputVals.size(); ++I) {
+      if (I)
+        Init += ", ";
+      Init += RegInputFieldByVal.lookup(RegInputVals[I]);
+      Init += ": -1";
+    }
+    Init += "}";
+    OutStreamer->emitRawText("\t" + Init);
   }
-  Init += "}";
-  OutStreamer->emitRawText("\t" + Init);
 
   for (unsigned Val : RegInputVals) {
     const InlineAsmOperandDesc &D = Descs[Val];

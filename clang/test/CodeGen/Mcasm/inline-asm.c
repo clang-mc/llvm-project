@@ -47,6 +47,16 @@ int inline_literal_braces(int x) {
   return x;
 }
 
+int inline_direct_args(int x) {
+  __asm__ volatile (
+      "$$direct_args\n"
+      "inline const 3\n"
+      "inline return %0"
+      :
+      : "r"(x));
+  return x;
+}
+
 // ASM-LABEL: inline_input_only:
 // ASM: inline data modify storage std:vm ls0 set value {a: -1}
 // ASM: inline execute store result storage std:vm ls0.a int 1 run scoreboard players get
@@ -78,6 +88,11 @@ int inline_literal_braces(int x) {
 // ASM-LABEL: inline_literal_braces:
 // ASM: inline function _ll_shared:z/inline_literal_braces_0 with storage std:vm ls0
 
+// ASM-LABEL: inline_direct_args:
+// ASM-NOT: inline data modify storage std:vm ls0 set value {a: -1}
+// ASM: inline execute store result storage std:vm ls0.a int 1 run scoreboard players get
+// ASM: inline function _ll_shared:z/inline_direct_args_0 with storage std:vm ls0
+
 // ASM: export _ll_shared:z/inline_input_only_0:
 // ASM: inline $return $(a)
 // ASM-NOT: export _ll_shared:z/inline_duplicate_same_function_0:
@@ -97,3 +112,7 @@ int inline_literal_braces(int x) {
 // ASM: inline $data modify storage std:vm s1.str set from storage std:vm char2str_map[$(a)]
 // ASM-NOT: $(str:
 // ASM-NOT: next: ""$)
+// ASM: export _ll_shared:z/inline_direct_args_0:
+// ASM-NOT: $$direct_args
+// ASM: inline const 3
+// ASM: inline $return $(a)
