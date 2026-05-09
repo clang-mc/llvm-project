@@ -326,16 +326,31 @@ static void writeBitsToMcasmSlots(const APInt &Bits, uint64_t StorageBits,
   }
 }
 
-static bool collectMcasmFunctionPointerInit(
-    const Constant *C, uint64_t Offset, McasmAsmPrinter &AP,
-    SmallVectorImpl<McasmRuntimeStaticInitEntry> &Entries) {
+static bool collectMcasmPointerInit(
+    const Constant *C, const DataLayout &DL, uint64_t Offset,
+    McasmAsmPrinter &AP, SmallVectorImpl<McasmRuntimeStaticInitEntry> &Entries) {
   const auto *Stripped = C->stripPointerCasts();
-  const auto *GV = dyn_cast<GlobalValue>(Stripped);
-  if (!GV || !isa<Function>(GV))
+  if (const auto *GV = dyn_cast<GlobalValue>(Stripped)) {
+    Entries.push_back(
+        {Offset, AP.getSymbol(GV)->getName().str(), 0, isa<Function>(GV)});
+    return true;
+  }
+
+  const auto *GEP = dyn_cast<GEPOperator>(C);
+  if (!GEP)
     return false;
 
-  Entries.push_back(
-      {Offset, AP.getSymbol(GV)->getName().str()});
+  APInt AddendBits(DL.getPointerTypeSizeInBits(C->getType()), 0, true);
+  if (!GEP->accumulateConstantOffset(DL, AddendBits))
+    return false;
+
+  const auto *BaseGV =
+      dyn_cast<GlobalValue>(GEP->getPointerOperand()->stripPointerCasts());
+  if (!BaseGV)
+    return false;
+
+  Entries.push_back({Offset, AP.getSymbol(BaseGV)->getName().str(),
+                     AddendBits.getSExtValue(), isa<Function>(BaseGV)});
   return true;
 }
 
@@ -363,7 +378,7 @@ static void serializeMcasmInitializer(const Constant *C, const DataLayout &DL,
     return;
   }
 
-  if (collectMcasmFunctionPointerInit(C, Offset, AP, Entries)) {
+  if (collectMcasmPointerInit(C, DL, Offset, AP, Entries)) {
     return;
   }
 
@@ -512,8 +527,17 @@ void McasmAsmPrinter::emitStartOfAsmFile(Module &M) {
         std::string Dest = "[r0]";
         if (Entry.Offset != 0)
           Dest = (Twine("[r0+") + Twine(Entry.Offset) + "]").str();
-        OutStreamer->emitRawText(
-            (Twine("\tmovd\t") + Dest + ", " + Entry.Target).str());
+        if (Entry.IsFunctionRef) {
+          OutStreamer->emitRawText(
+              (Twine("\tmovd\t") + Dest + ", " + Entry.Target).str());
+          continue;
+        }
+
+        OutStreamer->emitRawText((Twine("\tmov\tr1, ") + Entry.Target).str());
+        if (Entry.Addend != 0)
+          OutStreamer->emitRawText(
+              (Twine("\tadd\tr1, ") + Twine(Entry.Addend)).str());
+        OutStreamer->emitRawText((Twine("\tmov\t") + Dest + ", r1").str());
       }
     }
     OutStreamer->emitRawText("\tmov\tr0, 0");

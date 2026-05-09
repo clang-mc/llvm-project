@@ -34,6 +34,8 @@ class GlobalVariable;
 struct McasmRuntimeStaticInitEntry {
   uint64_t Offset = 0;
   std::string Target;
+  int64_t Addend = 0;
+  bool IsFunctionRef = false;
 };
 
 struct McasmRuntimeStaticInitRecord {
