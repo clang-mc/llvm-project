@@ -88,14 +88,18 @@ McasmTargetLowering::McasmTargetLowering(const McasmTargetMachine &TM,
   setOperationPromotedToType(ISD::LOAD, MVT::i1, MVT::i32);
   setOperationPromotedToType(ISD::STORE, MVT::i1, MVT::i32);
   // Sub-32-bit values may still appear as extloads/truncstores after type
-  // legalization (e.g. i8 spills/reloads). Lower them explicitly as byte-
+  // legalization (e.g. i1 globals and i8 spills/reloads). Lower them explicitly as byte-
   // aware accesses because mcasm has no byte/halfword memory ops.
+  setLoadExtAction(ISD::EXTLOAD, MVT::i32, MVT::i1, Custom);
+  setLoadExtAction(ISD::SEXTLOAD, MVT::i32, MVT::i1, Custom);
+  setLoadExtAction(ISD::ZEXTLOAD, MVT::i32, MVT::i1, Custom);
   setLoadExtAction(ISD::EXTLOAD, MVT::i32, MVT::i8, Custom);
   setLoadExtAction(ISD::SEXTLOAD, MVT::i32, MVT::i8, Custom);
   setLoadExtAction(ISD::ZEXTLOAD, MVT::i32, MVT::i8, Custom);
   setLoadExtAction(ISD::EXTLOAD, MVT::i32, MVT::i16, Custom);
   setLoadExtAction(ISD::SEXTLOAD, MVT::i32, MVT::i16, Custom);
   setLoadExtAction(ISD::ZEXTLOAD, MVT::i32, MVT::i16, Custom);
+  setTruncStoreAction(MVT::i32, MVT::i1, Custom);
   setTruncStoreAction(MVT::i32, MVT::i8, Custom);
   setTruncStoreAction(MVT::i32, MVT::i16, Custom);
   // Compute derived properties
@@ -904,7 +908,7 @@ SDValue McasmTargetLowering::lowerByteSemanticLoad(SDValue Op,
   if (VT != MVT::i32 || LD->getExtensionType() == ISD::NON_EXTLOAD)
     return SDValue();
 
-  if (MemVT != MVT::i8 && MemVT != MVT::i16)
+  if (MemVT != MVT::i1 && MemVT != MVT::i8 && MemVT != MVT::i16)
     return SDValue();
 
   EVT PtrVT = LD->getBasePtr().getValueType();
@@ -915,6 +919,17 @@ SDValue McasmTargetLowering::lowerByteSemanticLoad(SDValue Op,
       MVT::i32, DL, LD->getChain(), WordPtr, LD->getPointerInfo(), Align(4),
       LD->getMemOperand()->getFlags(), LD->getAAInfo(), LD->getRanges());
   SDValue Value = WideLoad;
+
+  if (MemVT == MVT::i1) {
+    if (LD->getExtensionType() != ISD::EXTLOAD)
+      Value = DAG.getNode(ISD::AND, DL, MVT::i32, Value,
+                          DAG.getConstant(1, DL, MVT::i32));
+    if (LD->getExtensionType() == ISD::SEXTLOAD)
+      Value = DAG.getNode(ISD::SUB, DL, MVT::i32,
+                          DAG.getConstant(0, DL, MVT::i32), Value);
+    SDValue Ops[] = {Value, WideLoad.getValue(1)};
+    return DAG.getMergeValues(Ops, DL);
+  }
 
   if (MemVT == MVT::i8) {
     SDValue ShiftAmt = lowerPointerBitShiftAmount(Lane, DL, DAG);
@@ -1005,8 +1020,16 @@ SDValue McasmTargetLowering::lowerByteSemanticStore(SDValue Op,
   if (!ST->isTruncatingStore())
     return SDValue();
 
-  if (MemVT != MVT::i8 && MemVT != MVT::i16)
+  if (MemVT != MVT::i1 && MemVT != MVT::i8 && MemVT != MVT::i16)
     return SDValue();
+
+  if (MemVT == MVT::i1) {
+    Value = DAG.getNode(ISD::AND, DL, MVT::i32, Value,
+                        DAG.getConstant(1, DL, MVT::i32));
+    return DAG.getStore(ST->getChain(), DL, Value, WordPtr,
+                        ST->getPointerInfo(), Align(4),
+                        ST->getMemOperand()->getFlags(), ST->getAAInfo());
+  }
 
   SDValue Lane = lowerPointerByteLane(BasePtr, DL, DAG);
   SDValue OldWord =

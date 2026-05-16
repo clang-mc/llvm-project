@@ -3,6 +3,7 @@
 @bytes = global [4 x i8] c"ABCD", align 4
 @halves = global [4 x i16] [i16 1, i16 2, i16 3, i16 4], align 4
 @mix = global { i8, i16, i8 } { i8 1, i16 515, i8 4 }, align 4
+@flag = global i1 true, align 4
 
 define i32 @load_byte_1() {
 entry:
@@ -10,6 +11,25 @@ entry:
   %v = load i8, ptr %p, align 1
   %z = zext i8 %v to i32
   ret i32 %z
+}
+
+define i32 @load_i1() {
+entry:
+  %v = load i1, ptr @flag, align 1
+  %z = zext i1 %v to i32
+  ret i32 %z
+}
+
+define i32 @load_i1_branch() {
+entry:
+  %v = load i1, ptr @flag, align 1
+  br i1 %v, label %true, label %false
+
+true:
+  ret i32 11
+
+false:
+  ret i32 0
 }
 
 define i32 @load_half_1() {
@@ -27,6 +47,12 @@ entry:
   ret void
 }
 
+define void @store_i1(i1 %v) {
+entry:
+  store i1 %v, ptr @flag, align 1
+  ret void
+}
+
 define void @store_half_1() {
 entry:
   %p = getelementptr inbounds [4 x i16], ptr @halves, i32 0, i32 1
@@ -40,6 +66,17 @@ entry:
 ; CHECK-NOT: __bit_shr
 ; CHECK-NOT: bytes+
 
+; CHECK-LABEL: load_i1:
+; CHECK: mov [[F:r[0-9]+]], flag
+; CHECK: mov [[F]], {{\[}}[[F]]{{\]}}
+; CHECK: mov r1, 1
+; CHECK: call __bit_and
+
+; CHECK-LABEL: load_i1_branch:
+; CHECK: mov [[AF:r[0-9]+]], flag
+; CHECK: mov [[AF]], {{\[}}[[AF]]{{\]}}
+; CHECK: call __bit_and
+
 ; CHECK-LABEL: load_half_1:
 ; CHECK: mov [[H:r[0-9]+]], halves
 ; CHECK: add [[H]], 2
@@ -52,6 +89,10 @@ entry:
 ; CHECK: mov
 ; CHECK: mov [{{[rx][0-9]+}}], rax
 
+; CHECK-LABEL: store_i1:
+; CHECK: mov [[SF:[rx][0-9]+]], flag
+; CHECK: mov [{{[rx][0-9]+}}], rax
+
 ; CHECK-LABEL: store_half_1:
 ; CHECK: mov [[SH:[rx][0-9]+]], halves
 ; CHECK: add [[SH]], 2
@@ -61,3 +102,4 @@ entry:
 ; CHECK: static bytes [65, 66, 67, 68]
 ; CHECK: static halves [1, 0, 2, 0, 3, 0, 4, 0]
 ; CHECK: static mix [1, 0, 515, 0, 4, 0]
+; CHECK: static flag [1]
