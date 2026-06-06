@@ -63,7 +63,12 @@ enum NodeType : unsigned {
   WrapperPIC,
 
   /// Wrapper for a function address - requires MOVD instead of MOV.
-  FunctionWrapper
+  FunctionWrapper,
+
+  /// NEG_BOOL_MASK: Takes a boolean (0 or 1) i32, returns 0 or 0xFFFFFFFF.
+  /// Used in branchless SELECT to prevent DAGCombine from re-recognizing the
+  /// arithmetic as SELECT (which would cause an infinite re-legalization loop).
+  NEG_BOOL_MASK
 };
 } // namespace McasmISD
 

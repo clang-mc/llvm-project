@@ -140,6 +140,10 @@ def SDTMcasmCmpccxadd : SDTypeProfile<1, 4, [SDTCisSameAs<0, 2>,
 
 def McasmMFence : SDNode<"McasmISD::MFENCE", SDTNone, [SDNPHasChain]>;
 
+// NEG_BOOL_MASK: converts boolean i32 (0 or 1) to 0 or 0xFFFFFFFF.
+// Opaque to DAGCombine so AND(NEG_BOOL_MASK(c), x) is not re-folded to SELECT.
+def McasmNegBoolMask : SDNode<"McasmISD::NEG_BOOL_MASK", SDTIntUnaryOp>;
+
 
 def Mcasmbsf     : SDNode<"McasmISD::BSF",      SDTBinaryArithWithFlags>;
 def Mcasmbsr     : SDNode<"McasmISD::BSR",      SDTBinaryArithWithFlags>;

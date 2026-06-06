@@ -87,18 +87,20 @@ McasmTargetLowering::McasmTargetLowering(const McasmTargetMachine &TM,
   // Tell LLVM that i64 is not a native type and should be promoted/expanded
   setOperationPromotedToType(ISD::LOAD, MVT::i1, MVT::i32);
   setOperationPromotedToType(ISD::STORE, MVT::i1, MVT::i32);
-  // Sub-32-bit values may still appear as extloads/truncstores after type
-  // legalization (e.g. i1 globals and i8 spills/reloads). Lower them explicitly as byte-
-  // aware accesses because mcasm has no byte/halfword memory ops.
-  setLoadExtAction(ISD::EXTLOAD, MVT::i32, MVT::i1, Custom);
-  setLoadExtAction(ISD::SEXTLOAD, MVT::i32, MVT::i1, Custom);
-  setLoadExtAction(ISD::ZEXTLOAD, MVT::i32, MVT::i1, Custom);
-  setLoadExtAction(ISD::EXTLOAD, MVT::i32, MVT::i8, Custom);
-  setLoadExtAction(ISD::SEXTLOAD, MVT::i32, MVT::i8, Custom);
-  setLoadExtAction(ISD::ZEXTLOAD, MVT::i32, MVT::i8, Custom);
-  setLoadExtAction(ISD::EXTLOAD, MVT::i32, MVT::i16, Custom);
-  setLoadExtAction(ISD::SEXTLOAD, MVT::i32, MVT::i16, Custom);
-  setLoadExtAction(ISD::ZEXTLOAD, MVT::i32, MVT::i16, Custom);
+  // Sub-32-bit loads: mark Legal so DAGCombine's load-narrowing (which converts
+  // AND(load_i32, mask) to zextloadi8/i16) terminates without re-entering
+  // Custom lowering. The instruction selector handles them via .td patterns
+  // (word load + AND/SHL+SAR). Making them Custom caused an infinite loop:
+  //   AND(load, mask) -> ZEXTLOAD Custom -> AND(load, mask) -> ...
+  setLoadExtAction(ISD::EXTLOAD,  MVT::i32, MVT::i1,  Legal);
+  setLoadExtAction(ISD::SEXTLOAD, MVT::i32, MVT::i1,  Legal);
+  setLoadExtAction(ISD::ZEXTLOAD, MVT::i32, MVT::i1,  Legal);
+  setLoadExtAction(ISD::EXTLOAD,  MVT::i32, MVT::i8,  Legal);
+  setLoadExtAction(ISD::SEXTLOAD, MVT::i32, MVT::i8,  Legal);
+  setLoadExtAction(ISD::ZEXTLOAD, MVT::i32, MVT::i8,  Legal);
+  setLoadExtAction(ISD::EXTLOAD,  MVT::i32, MVT::i16, Legal);
+  setLoadExtAction(ISD::SEXTLOAD, MVT::i32, MVT::i16, Legal);
+  setLoadExtAction(ISD::ZEXTLOAD, MVT::i32, MVT::i16, Legal);
   setTruncStoreAction(MVT::i32, MVT::i1, Custom);
   setTruncStoreAction(MVT::i32, MVT::i8, Custom);
   setTruncStoreAction(MVT::i32, MVT::i16, Custom);
@@ -272,11 +274,6 @@ McasmTargetLowering::McasmTargetLowering(const McasmTargetMachine &TM,
 
   // i64 calling convention handled in CC_Mcasm (see McasmCallingConv.cpp)
 
-  // i32 bit shifts - force custom lowering to __bit_* libcalls.
-  // This prevents DAG combine from re-introducing native bit instructions.
-  setOperationAction(ISD::SHL, MVT::i32, Custom);
-  setOperationAction(ISD::SRA, MVT::i32, Custom);
-  setOperationAction(ISD::SRL, MVT::i32, Custom);
   // Handle sext i1 -> i32 early to avoid legalization loops.
   setOperationAction(ISD::SIGN_EXTEND, MVT::i32, Custom);
   setOperationAction(ISD::SIGN_EXTEND, MVT::i1, Custom);
@@ -297,10 +294,6 @@ McasmTargetLowering::McasmTargetLowering(const McasmTargetMachine &TM,
   setOperationAction(ISD::SRL_PARTS, MVT::i32, Custom);
   setOperationAction(ISD::SRA_PARTS, MVT::i32, Custom);
 
-  // i32 logical ops - force custom lowering to __bit_* libcalls.
-  setOperationAction(ISD::AND, MVT::i32, Custom);
-  setOperationAction(ISD::OR, MVT::i32, Custom);
-  setOperationAction(ISD::XOR, MVT::i32, Custom);
   // CTTZ/CTLZ/CTPOP: Expand generates a de Bruijn byte-table lookup which
   // requires i8 memory access 鈥?unsupported on Mcasm (word-addressed only).
   // Use Custom lowering that only uses AND/OR/SRL/ADD/MUL (all Legal).
@@ -895,6 +888,7 @@ const char *McasmTargetLowering::getTargetNodeName(unsigned Opcode) const {
   case McasmISD::Wrapper:         return "McasmISD::Wrapper";
   case McasmISD::WrapperPIC:      return "McasmISD::WrapperPIC";
   case McasmISD::FunctionWrapper: return "McasmISD::FunctionWrapper";
+  case McasmISD::NEG_BOOL_MASK:   return "McasmISD::NEG_BOOL_MASK";
   }
 }
 
@@ -1168,26 +1162,6 @@ SDValue McasmTargetLowering::LowerOperation(SDValue Op, SelectionDAG &DAG) const
   case ISD::CTPOP:
     return lowerCTPOP(Op, DAG);
 
-  case ISD::AND:
-    if (Op.getValueType() == MVT::i32)
-      return LowerI32BitLibCall(Op, DAG, "__bit_and", {Op.getOperand(0), Op.getOperand(1)});
-    break;
-  case ISD::OR:
-    if (Op.getValueType() == MVT::i32)
-      return LowerI32BitLibCall(Op, DAG, "__bit_or", {Op.getOperand(0), Op.getOperand(1)});
-    break;
-  case ISD::XOR:
-    if (Op.getValueType() == MVT::i32) {
-      SDValue LHS = Op.getOperand(0);
-      SDValue RHS = Op.getOperand(1);
-      if (auto *C = dyn_cast<ConstantSDNode>(LHS); C && C->isAllOnes())
-        return LowerI32BitLibCall(Op, DAG, "__bit_not", {RHS});
-      if (auto *C = dyn_cast<ConstantSDNode>(RHS); C && C->isAllOnes())
-        return LowerI32BitLibCall(Op, DAG, "__bit_not", {LHS});
-      return LowerI32BitLibCall(Op, DAG, "__bit_xor", {LHS, RHS});
-    }
-    break;
-
   // i64 arithmetic operations - lower to libcalls
   case ISD::MUL:
     if (Op.getValueType() == MVT::i64)
@@ -1209,25 +1183,6 @@ SDValue McasmTargetLowering::LowerOperation(SDValue Op, SelectionDAG &DAG) const
     if (Op.getValueType() == MVT::i64)
       return LowerI64LibCall(Op, DAG, RTLIB::UREM_I64);
     break;
-  case ISD::SHL:
-    if (Op.getValueType() == MVT::i32)
-      return LowerI32BitLibCall(Op, DAG, "__bit_shl", {Op.getOperand(0), Op.getOperand(1)});
-    if (Op.getValueType() == MVT::i64)
-      return LowerI64LibCall(Op, DAG, RTLIB::SHL_I64);
-    break;
-  case ISD::SRL:
-    if (Op.getValueType() == MVT::i32)
-      return LowerI32BitLibCall(Op, DAG, "__bit_shr", {Op.getOperand(0), Op.getOperand(1)});
-    if (Op.getValueType() == MVT::i64)
-      return LowerI64LibCall(Op, DAG, RTLIB::SRL_I64);
-    break;
-  case ISD::SRA:
-    if (Op.getValueType() == MVT::i32)
-      return LowerI32BitLibCall(Op, DAG, "__bit_sar", {Op.getOperand(0), Op.getOperand(1)});
-    if (Op.getValueType() == MVT::i64)
-      return LowerI64LibCall(Op, DAG, RTLIB::SRA_I64);
-    break;
-
   case ISD::BUILD_VECTOR:
     // mcasm does not support vector operations - return SDValue() to let LLVM expand
     return SDValue();
@@ -1935,11 +1890,9 @@ SDValue McasmTargetLowering::lowerSELECT(SDValue Op, SelectionDAG &DAG) const {
     if (Cond32.getValueType() != MVT::i32)
       Cond32 = DAG.getNode(ISD::ZERO_EXTEND, DL, MVT::i32, Cond32);
 
-    // neg(Cond) = NOT(Cond) + 1
-    SDValue NotCond = DAG.getNode(ISD::XOR, DL, MVT::i32, Cond32,
-                                  DAG.getConstant(0xFFFFFFFFU, DL, MVT::i32));
-    SDValue NegCond = DAG.getNode(ISD::ADD, DL, MVT::i32, NotCond,
-                                  DAG.getConstant(1, DL, MVT::i32));
+    // -Cond: 0->0, 1->0xFFFFFFFF. Wrapped in NEG_BOOL_MASK (target-specific node)
+    // so DAGCombine cannot recognize AND(result, diff) as SELECT and loop back.
+    SDValue NegCond = DAG.getNode(McasmISD::NEG_BOOL_MASK, DL, MVT::i32, Cond32);
     SDValue Diff = DAG.getNode(ISD::SUB, DL, MVT::i32, TV, FV);
     SDValue Mask = DAG.getNode(ISD::AND, DL, MVT::i32, NegCond, Diff);
     return DAG.getNode(ISD::ADD, DL, MVT::i32, FV, Mask);
@@ -1988,12 +1941,14 @@ computeShiftMasks(SDValue ShAmt, SDLoc DL, SelectionDAG &DAG) {
   SDValue NegN31      = DAG.getNode(ISD::SUB, DL, VT, C0, N31);
   SDValue Bit_n31_ne0 = DAG.getNode(ISD::SRL, DL, VT,
                           DAG.getNode(ISD::OR, DL, VT, N31, NegN31), C31);
-  SDValue N31NeZeroMask = DAG.getNode(ISD::SUB, DL, VT, C0, Bit_n31_ne0);
+  // NEG_BOOL_MASK is opaque to DAGCombine, preventing AND(mask, x) from being
+  // re-recognized as SELECT (which would cause an infinite re-legalization loop).
+  SDValue N31NeZeroMask = DAG.getNode(McasmISD::NEG_BOOL_MASK, DL, VT, Bit_n31_ne0);
 
   // mask_lt32: ((ShAmt - 32) >> 31) & 1 = 1 if ShAmt < 32, then 0 - bit
   SDValue ShAmt_m32 = DAG.getNode(ISD::SUB, DL, VT, ShAmt, C32);
   SDValue Bit_lt32  = DAG.getNode(ISD::SRL, DL, VT, ShAmt_m32, C31);
-  SDValue Mask_lt32 = DAG.getNode(ISD::SUB, DL, VT, C0, Bit_lt32);
+  SDValue Mask_lt32 = DAG.getNode(McasmISD::NEG_BOOL_MASK, DL, VT, Bit_lt32);
   SDValue Mask_ge32 = DAG.getNode(ISD::XOR, DL, VT, Mask_lt32, AllF);
 
   return {N31, Inv31, N31NeZeroMask, Mask_lt32, Mask_ge32};
