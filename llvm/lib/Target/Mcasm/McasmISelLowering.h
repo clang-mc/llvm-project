@@ -68,7 +68,11 @@ enum NodeType : unsigned {
   /// NEG_BOOL_MASK: Takes a boolean (0 or 1) i32, returns 0 or 0xFFFFFFFF.
   /// Used in branchless SELECT to prevent DAGCombine from re-recognizing the
   /// arithmetic as SELECT (which would cause an infinite re-legalization loop).
-  NEG_BOOL_MASK
+  NEG_BOOL_MASK,
+
+  /// SETCC_DIA: (lhs, rhs, cc) → 0 or 1 via conditional-jump diamond.
+  /// Lowered by EmitInstrWithCustomInserter to SETCC32rri pseudo.
+  SETCC_DIA
 };
 } // namespace McasmISD
 
@@ -84,6 +88,21 @@ public:
   SDValue LowerOperation(SDValue Op, SelectionDAG &DAG) const override;
   void ReplaceNodeResults(SDNode *N, SmallVectorImpl<SDValue> &Results,
                           SelectionDAG &DAG) const override;
+
+  MachineBasicBlock *EmitInstrWithCustomInserter(MachineInstr &MI,
+                                                  MachineBasicBlock *MBB) const override;
+
+  /// mcasm is word-addressed and has no narrow (byte/halfword) load
+  /// instructions, so narrowing AND(load, mask) to a sub-word zextload is never
+  /// profitable.  More importantly, it would reintroduce a re-legalization loop:
+  ///   AND(wordload, mask) -> zextloadi8 (Custom) -> lowerByteSemanticLoad ->
+  ///   AND(wordload, mask) -> ...
+  /// Disabling load-width reduction breaks that cycle at its source.
+  bool shouldReduceLoadWidth(
+      SDNode *Load, ISD::LoadExtType ExtTy, EVT NewVT,
+      std::optional<unsigned> ByteOffset = std::nullopt) const override {
+    return false;
+  }
 
   ConstraintType getConstraintType(StringRef Constraint) const override;
   std::pair<unsigned, const TargetRegisterClass *>

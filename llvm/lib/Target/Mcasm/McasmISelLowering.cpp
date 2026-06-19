@@ -20,8 +20,11 @@
 #include "McasmSubtarget.h"
 #include "McasmTargetMachine.h"
 #include "llvm/CodeGen/CallingConvLower.h"
+#include "llvm/CodeGen/ISDOpcodes.h"
+#include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineFunction.h"
+#include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/CodeGen/SelectionDAG.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -33,6 +36,9 @@ using namespace llvm;
 // Include TableGen-generated files
 #define GET_REGINFO_ENUM
 #include "McasmGenRegisterInfo.inc"
+
+#define GET_INSTRINFO_ENUM
+#include "McasmGenInstrInfo.inc"
 
 // NOTE: We use C++ custom calling convention instead of TableGen
 // #include "McasmGenCallingConv.inc"
@@ -87,20 +93,21 @@ McasmTargetLowering::McasmTargetLowering(const McasmTargetMachine &TM,
   // Tell LLVM that i64 is not a native type and should be promoted/expanded
   setOperationPromotedToType(ISD::LOAD, MVT::i1, MVT::i32);
   setOperationPromotedToType(ISD::STORE, MVT::i1, MVT::i32);
-  // Sub-32-bit loads: mark Legal so DAGCombine's load-narrowing (which converts
-  // AND(load_i32, mask) to zextloadi8/i16) terminates without re-entering
-  // Custom lowering. The instruction selector handles them via .td patterns
-  // (word load + AND/SHL+SAR). Making them Custom caused an infinite loop:
-  //   AND(load, mask) -> ZEXTLOAD Custom -> AND(load, mask) -> ...
-  setLoadExtAction(ISD::EXTLOAD,  MVT::i32, MVT::i1,  Legal);
-  setLoadExtAction(ISD::SEXTLOAD, MVT::i32, MVT::i1,  Legal);
-  setLoadExtAction(ISD::ZEXTLOAD, MVT::i32, MVT::i1,  Legal);
-  setLoadExtAction(ISD::EXTLOAD,  MVT::i32, MVT::i8,  Legal);
-  setLoadExtAction(ISD::SEXTLOAD, MVT::i32, MVT::i8,  Legal);
-  setLoadExtAction(ISD::ZEXTLOAD, MVT::i32, MVT::i8,  Legal);
-  setLoadExtAction(ISD::EXTLOAD,  MVT::i32, MVT::i16, Legal);
-  setLoadExtAction(ISD::SEXTLOAD, MVT::i32, MVT::i16, Legal);
-  setLoadExtAction(ISD::ZEXTLOAD, MVT::i32, MVT::i16, Legal);
+  // Sub-32-bit loads: Custom so lowerByteSemanticLoad handles them with a
+  // word load + AND mask (the AND is in turn lowered to a __bit_and libcall).
+  // The old ZEXTLOAD re-legalization loop (AND(load,mask) → ZEXTLOAD → byte
+  // load → AND(load,mask) → …) is broken at its source by shouldReduceLoadWidth
+  // returning false, which stops DAGCombine from re-narrowing AND(load,mask)
+  // back into a sub-word zextload.
+  setLoadExtAction(ISD::EXTLOAD,  MVT::i32, MVT::i1,  Custom);
+  setLoadExtAction(ISD::SEXTLOAD, MVT::i32, MVT::i1,  Custom);
+  setLoadExtAction(ISD::ZEXTLOAD, MVT::i32, MVT::i1,  Custom);
+  setLoadExtAction(ISD::EXTLOAD,  MVT::i32, MVT::i8,  Custom);
+  setLoadExtAction(ISD::SEXTLOAD, MVT::i32, MVT::i8,  Custom);
+  setLoadExtAction(ISD::ZEXTLOAD, MVT::i32, MVT::i8,  Custom);
+  setLoadExtAction(ISD::EXTLOAD,  MVT::i32, MVT::i16, Custom);
+  setLoadExtAction(ISD::SEXTLOAD, MVT::i32, MVT::i16, Custom);
+  setLoadExtAction(ISD::ZEXTLOAD, MVT::i32, MVT::i16, Custom);
   setTruncStoreAction(MVT::i32, MVT::i1, Custom);
   setTruncStoreAction(MVT::i32, MVT::i8, Custom);
   setTruncStoreAction(MVT::i32, MVT::i16, Custom);
@@ -302,6 +309,18 @@ McasmTargetLowering::McasmTargetLowering(const McasmTargetMachine &TM,
   setOperationAction(ISD::CTLZ,            MVT::i32, Custom);
   setOperationAction(ISD::CTLZ_ZERO_UNDEF, MVT::i32, Custom);
   setOperationAction(ISD::CTPOP,           MVT::i32, Custom);
+
+  // i32 bitwise ops: mcasm VM does not execute native AND/OR/XOR/SHL/SHR/SAR
+  // instructions.  Lower them all to __bit_* software libcalls (see
+  // LowerOperation).  These catch i8/i16-promoted bitops and any bitop the DAG
+  // introduces (type legalization, byte-semantic load/store masking, etc.)
+  // that the IR-level McasmLowerBitOpsPass did not see.
+  setOperationAction(ISD::AND, MVT::i32, Custom);
+  setOperationAction(ISD::OR,  MVT::i32, Custom);
+  setOperationAction(ISD::XOR, MVT::i32, Custom);
+  setOperationAction(ISD::SHL, MVT::i32, Custom);
+  setOperationAction(ISD::SRL, MVT::i32, Custom);
+  setOperationAction(ISD::SRA, MVT::i32, Custom);
 
   // Comparison operations
   // mcasm has no native setcc result instruction. Keep custom lowering for
@@ -889,6 +908,7 @@ const char *McasmTargetLowering::getTargetNodeName(unsigned Opcode) const {
   case McasmISD::WrapperPIC:      return "McasmISD::WrapperPIC";
   case McasmISD::FunctionWrapper: return "McasmISD::FunctionWrapper";
   case McasmISD::NEG_BOOL_MASK:   return "McasmISD::NEG_BOOL_MASK";
+  case McasmISD::SETCC_DIA:       return "McasmISD::SETCC_DIA";
   }
 }
 
@@ -1026,9 +1046,12 @@ SDValue McasmTargetLowering::lowerByteSemanticStore(SDValue Op,
   }
 
   SDValue Lane = lowerPointerByteLane(BasePtr, DL, DAG);
+  // The read-modify-write helper load must carry pure load semantics.  Reusing
+  // the store's MMO flags (which include MOStore) would tag a MOV32rm load with
+  // mayStore and trip the machine verifier ("Missing mayStore flag").
   SDValue OldWord =
       DAG.getLoad(MVT::i32, DL, ST->getChain(), WordPtr, ST->getPointerInfo(),
-                  Align(4), ST->getMemOperand()->getFlags(), ST->getAAInfo());
+                  Align(4), MachineMemOperand::MOLoad, ST->getAAInfo());
   SDValue ShiftAmt = lowerPointerBitShiftAmount(Lane, DL, DAG);
   if (PtrVT != MVT::i32)
     ShiftAmt = DAG.getNode(ISD::TRUNCATE, DL, MVT::i32, ShiftAmt);
@@ -1101,7 +1124,7 @@ SDValue McasmTargetLowering::lowerByteSemanticStore(SDValue Op,
   SDValue NextLane = lowerPointerByteLane(NextPtr, DL, DAG);
   SDValue NextOld =
       DAG.getLoad(MVT::i32, DL, FirstStore, NextWordPtr, MachinePointerInfo(),
-                  Align(4), ST->getMemOperand()->getFlags(), ST->getAAInfo());
+                  Align(4), MachineMemOperand::MOLoad, ST->getAAInfo());
   SDValue NextShiftAmt = lowerPointerBitShiftAmount(NextLane, DL, DAG);
   if (PtrVT != MVT::i32)
     NextShiftAmt = DAG.getNode(ISD::TRUNCATE, DL, MVT::i32, NextShiftAmt);
@@ -1161,6 +1184,50 @@ SDValue McasmTargetLowering::LowerOperation(SDValue Op, SelectionDAG &DAG) const
     return lowerCTLZ(Op, DAG);
   case ISD::CTPOP:
     return lowerCTPOP(Op, DAG);
+
+  // i32 bitwise ops - lower to __bit_* software libcalls
+  case ISD::AND:
+    if (Op.getValueType() == MVT::i32)
+      return LowerI32BitLibCall(Op, DAG, "__bit_and",
+                                {Op.getOperand(0), Op.getOperand(1)});
+    break;
+  case ISD::OR:
+    if (Op.getValueType() == MVT::i32)
+      return LowerI32BitLibCall(Op, DAG, "__bit_or",
+                                {Op.getOperand(0), Op.getOperand(1)});
+    break;
+  case ISD::XOR:
+    if (Op.getValueType() == MVT::i32) {
+      SDValue LHS = Op.getOperand(0);
+      SDValue RHS = Op.getOperand(1);
+      if (auto *C = dyn_cast<ConstantSDNode>(RHS); C && C->isAllOnes())
+        return LowerI32BitLibCall(Op, DAG, "__bit_not", {LHS});
+      if (auto *C = dyn_cast<ConstantSDNode>(LHS); C && C->isAllOnes())
+        return LowerI32BitLibCall(Op, DAG, "__bit_not", {RHS});
+      return LowerI32BitLibCall(Op, DAG, "__bit_xor", {LHS, RHS});
+    }
+    break;
+  case ISD::SHL:
+    if (Op.getValueType() == MVT::i32)
+      return LowerI32BitLibCall(Op, DAG, "__bit_shl",
+                                {Op.getOperand(0), Op.getOperand(1)});
+    if (Op.getValueType() == MVT::i64)
+      return LowerI64LibCall(Op, DAG, RTLIB::SHL_I64);
+    break;
+  case ISD::SRL:
+    if (Op.getValueType() == MVT::i32)
+      return LowerI32BitLibCall(Op, DAG, "__bit_shr",
+                                {Op.getOperand(0), Op.getOperand(1)});
+    if (Op.getValueType() == MVT::i64)
+      return LowerI64LibCall(Op, DAG, RTLIB::SRL_I64);
+    break;
+  case ISD::SRA:
+    if (Op.getValueType() == MVT::i32)
+      return LowerI32BitLibCall(Op, DAG, "__bit_sar",
+                                {Op.getOperand(0), Op.getOperand(1)});
+    if (Op.getValueType() == MVT::i64)
+      return LowerI64LibCall(Op, DAG, RTLIB::SRA_I64);
+    break;
 
   // i64 arithmetic operations - lower to libcalls
   case ISD::MUL:
@@ -1549,14 +1616,14 @@ SDValue McasmTargetLowering::lowerBRCOND(SDValue Op, SelectionDAG &DAG) const {
       CC = normalizeSameSignIntCC(CC);
 
     // mcasm only has signed comparison instructions (JG/JL/JGE/JLE).
-    // Convert unsigned comparisons to signed by XOR-ing both operands
-    // with 0x80000000 (flip the sign bit).  This preserves unsigned ordering
-    // under signed comparison:  a <u b  iff  (a^MSB) <s (b^MSB).
+    // Convert unsigned comparisons to signed by adding 0x80000000 to both
+    // operands (flips the MSB).  ADD(x, 0x80000000) ≡ XOR(x, 0x80000000)
+    // mod 2^32; ADD is Legal (not Custom), avoiding a libcall here.
     MVT OpVT = LHS.getSimpleValueType();
     if (OpVT == MVT::i32) {
       SDValue MSB = DAG.getConstant(0x80000000U, DL, MVT::i32);
       auto flipMSB = [&](SDValue V) {
-        return DAG.getNode(ISD::XOR, DL, MVT::i32, V, MSB);
+        return DAG.getNode(ISD::ADD, DL, MVT::i32, V, MSB);
       };
       switch (CC) {
       case ISD::SETULT: LHS = flipMSB(LHS); RHS = flipMSB(RHS); CC = ISD::SETLT; break;
@@ -1591,13 +1658,14 @@ SDValue McasmTargetLowering::lowerBR_CC(SDValue Op, SelectionDAG &DAG) const {
     CC = normalizeSameSignIntCC(CC);
 
   // mcasm only has signed comparison instructions (JG/JL/JGE/JLE).
-  // Convert unsigned comparisons to signed by XOR-ing both operands
-  // with 0x80000000 (flip the sign bit).
+  // Convert unsigned comparisons to signed by adding 0x80000000 to both
+  // operands.  ADD(x, 0x80000000) ≡ XOR(x, 0x80000000) mod 2^32;
+  // ADD is Legal (not Custom), avoiding libcalls in the branch path.
   MVT OpVT = LHS.getSimpleValueType();
   if (OpVT == MVT::i32) {
     SDValue MSB = DAG.getConstant(0x80000000U, DL, MVT::i32);
     auto flipMSB = [&](SDValue V) {
-      return DAG.getNode(ISD::XOR, DL, MVT::i32, V, MSB);
+      return DAG.getNode(ISD::ADD, DL, MVT::i32, V, MSB);
     };
     switch (CC) {
     case ISD::SETULT: LHS=flipMSB(LHS); RHS=flipMSB(RHS); CC=ISD::SETLT; break;
@@ -1808,56 +1876,36 @@ SDValue McasmTargetLowering::lowerSETCC(SDValue Op, SelectionDAG &DAG) const {
   if (LHS.getSimpleValueType() != MVT::i32)
     return SDValue();
 
-  SDValue C31  = DAG.getConstant(31,          DL, MVT::i32);
-  SDValue C1   = DAG.getConstant(1,           DL, MVT::i32);
-  SDValue MSB  = DAG.getConstant(0x80000000U, DL, MVT::i32);
-  SDValue AllF = DAG.getConstant(0xFFFFFFFFU, DL, MVT::i32);
-
-  // branchless SETULT using the borrow-out bit of A - B:
-  //   borrow = (((~A) & B) | (~(A ^ B) & (A - B))) >> 31
-  auto setult = [&](SDValue A, SDValue B) -> SDValue {
-    SDValue Sub = DAG.getNode(ISD::SUB, DL, MVT::i32, A, B);
-    SDValue NotA = DAG.getNode(ISD::XOR, DL, MVT::i32, A, AllF);
-    SDValue AxorB = DAG.getNode(ISD::XOR, DL, MVT::i32, A, B);
-    SDValue NotAxorB = DAG.getNode(ISD::XOR, DL, MVT::i32, AxorB, AllF);
-    SDValue T0 = DAG.getNode(ISD::AND, DL, MVT::i32, NotA, B);
-    SDValue T1 = DAG.getNode(ISD::AND, DL, MVT::i32, NotAxorB, Sub);
-    SDValue BorrowBits = DAG.getNode(ISD::OR, DL, MVT::i32, T0, T1);
-    SDValue Shr = DAG.getNode(ISD::SRL, DL, MVT::i32, BorrowBits, C31);
-    return DAG.getNode(ISD::AND, DL, MVT::i32, Shr, C1);
-  };
-  // flip the MSB (sign bit) to convert signed ordering to unsigned
+  // Convert unsigned comparisons to signed by flipping the MSB.
+  // ADD(x, 0x80000000) == XOR(x, 0x80000000) mod 2^32 (MSB toggles, carry
+  // discarded).  We use ADD (Legal) instead of XOR (Custom) to avoid emitting
+  // a __bit_xor libcall for every comparison.
+  SDValue MSB = DAG.getConstant(0x80000000U, DL, MVT::i32);
   auto flipMSB = [&](SDValue V) {
-    return DAG.getNode(ISD::XOR, DL, MVT::i32, V, MSB);
-  };
-  // NOT a 1-bit boolean value: x ^ 1
-  auto notBit = [&](SDValue V) {
-    return DAG.getNode(ISD::XOR, DL, MVT::i32, V, C1);
-  };
-  // branchless SETNE: ((d | -d) >> 31)  where d = A ^ B
-  // neg(x) = (NOT x) + 1
-  auto setne = [&](SDValue A, SDValue B) -> SDValue {
-    SDValue D    = DAG.getNode(ISD::XOR, DL, MVT::i32, A, B);
-    SDValue NotD = DAG.getNode(ISD::XOR, DL, MVT::i32, D, AllF);
-    SDValue NegD = DAG.getNode(ISD::ADD, DL, MVT::i32, NotD, C1);
-    SDValue OrD  = DAG.getNode(ISD::OR,  DL, MVT::i32, D, NegD);
-    return DAG.getNode(ISD::SRL, DL, MVT::i32, OrD, C31);
+    return DAG.getNode(ISD::ADD, DL, MVT::i32, V, MSB);
   };
 
   switch (CC) {
   default:
     return SDValue(); // Let LLVM handle unsupported CCs
-  case ISD::SETULT:  return setult(LHS, RHS);
-  case ISD::SETLT:   return setult(flipMSB(LHS), flipMSB(RHS));
-  case ISD::SETUGT:  return setult(RHS, LHS);
-  case ISD::SETGT:   return setult(flipMSB(RHS), flipMSB(LHS));
-  case ISD::SETULE:  return notBit(setult(RHS, LHS));       // NOT(a > b)
-  case ISD::SETLE:   return notBit(setult(flipMSB(RHS), flipMSB(LHS)));
-  case ISD::SETUGE:  return notBit(setult(LHS, RHS));       // NOT(a < b)
-  case ISD::SETGE:   return notBit(setult(flipMSB(LHS), flipMSB(RHS)));
-  case ISD::SETNE:   return setne(LHS, RHS);
-  case ISD::SETEQ:   return notBit(setne(LHS, RHS));
+  case ISD::SETULT: LHS = flipMSB(LHS); RHS = flipMSB(RHS); CC = ISD::SETLT; break;
+  case ISD::SETULE: LHS = flipMSB(LHS); RHS = flipMSB(RHS); CC = ISD::SETLE; break;
+  case ISD::SETUGT: LHS = flipMSB(LHS); RHS = flipMSB(RHS); CC = ISD::SETGT; break;
+  case ISD::SETUGE: LHS = flipMSB(LHS); RHS = flipMSB(RHS); CC = ISD::SETGE; break;
+  case ISD::SETLT:
+  case ISD::SETLE:
+  case ISD::SETGT:
+  case ISD::SETGE:
+  case ISD::SETEQ:
+  case ISD::SETNE:
+    break;
   }
+
+  // Emit SETCC_DIA(LHS, RHS, signed_CC): selected to SETCC32rri pseudo and
+  // then expanded by EmitInstrWithCustomInserter into a conditional-jump
+  // diamond.  Zero Custom bit-op libcalls are emitted.
+  return DAG.getNode(McasmISD::SETCC_DIA, DL, MVT::i32,
+                     LHS, RHS, DAG.getCondCode(CC));
 }
 
 // Lower SELECT to branchless arithmetic (mcasm has no CMOV instruction).
@@ -2120,5 +2168,106 @@ SDValue McasmTargetLowering::LowerI64LibCall(SDValue Op, SelectionDAG &DAG,
       makeLibCall(DAG, LC, VT, Ops, CallOptions, DL);
 
   return CallResult.first;
+}
+
+//===----------------------------------------------------------------------===//
+// SETCC32rri pseudo expansion (EmitInstrWithCustomInserter)
+//===----------------------------------------------------------------------===//
+//
+// Expands SETCC32rri into a conditional-jump diamond:
+//
+//   OrigBB:
+//     jcc LHS, RHS, TrueBB   (condition holds)
+//     [fall-through to FalseBB]
+//   FalseBB:
+//     FalseReg = MOV 0
+//     [fall-through to DoneBB]
+//   TrueBB:
+//     TrueReg = MOV 1
+//     [fall-through to DoneBB]
+//   DoneBB:
+//     Dst = PHI [FalseReg, FalseBB] [TrueReg, TrueBB]
+//     [remainder of original BB]
+
+static unsigned condCodeToJccOpcode(ISD::CondCode CC) {
+  switch (CC) {
+  default: llvm_unreachable("Unsupported CondCode in SETCC diamond");
+  case ISD::SETLT:  return Mcasm::JL32rr;
+  case ISD::SETLE:  return Mcasm::JLE32rr;
+  case ISD::SETGT:  return Mcasm::JG32rr;
+  case ISD::SETGE:  return Mcasm::JGE32rr;
+  case ISD::SETEQ:  return Mcasm::JE32rr;
+  case ISD::SETNE:  return Mcasm::JNE32rr;
+  }
+}
+
+MachineBasicBlock *McasmTargetLowering::EmitInstrWithCustomInserter(
+    MachineInstr &MI, MachineBasicBlock *BB) const {
+  assert(MI.getOpcode() == Mcasm::SETCC32rri &&
+         "EmitInstrWithCustomInserter: unexpected opcode");
+
+  MachineFunction &MF = *BB->getParent();
+  MachineRegisterInfo &MRI = MF.getRegInfo();
+  const TargetInstrInfo &TII = *MF.getSubtarget().getInstrInfo();
+  DebugLoc DL = MI.getDebugLoc();
+
+  Register DstReg = MI.getOperand(0).getReg();
+  Register LHSReg = MI.getOperand(1).getReg();
+  Register RHSReg = MI.getOperand(2).getReg();
+  ISD::CondCode CC = (ISD::CondCode)MI.getOperand(3).getImm();
+  unsigned JccOpc = condCodeToJccOpcode(CC);
+
+  MachineBasicBlock *OrigBB = BB;
+  const BasicBlock *LLVMBB = OrigBB->getBasicBlock();
+  const TargetRegisterClass *RC = MRI.getRegClass(DstReg);
+
+  // Triangle CFG (only two new blocks, no explicit unconditional jump needed):
+  //
+  //   OrigBB:  TrueReg = 1; jcc LHS,RHS,DoneBB   (taken when cond holds)
+  //            [fall-through to FalseBB]
+  //   FalseBB: FalseReg = 0
+  //            [fall-through to DoneBB]
+  //   DoneBB:  Dst = PHI [TrueReg, OrigBB] [FalseReg, FalseBB]
+  //            [remainder of original BB]
+  //
+  // Layout order OrigBB, FalseBB, DoneBB keeps every CFG edge consistent with a
+  // physical fall-through (DoneBB sits right before OrigBB's old successor).
+  MachineBasicBlock *FalseBB = MF.CreateMachineBasicBlock(LLVMBB);
+  MachineBasicBlock *DoneBB  = MF.CreateMachineBasicBlock(LLVMBB);
+
+  MachineFunction::iterator InsertPos = ++OrigBB->getIterator();
+  MF.insert(InsertPos, FalseBB);
+  MF.insert(InsertPos, DoneBB);
+
+  // Move rest of OrigBB (after MI) and its outgoing edges into DoneBB.
+  // transferSuccessorsAndUpdatePHIs (not transferSuccessors) rewrites PHIs in
+  // the successor blocks so their incoming-block operand for the moved edges
+  // refers to DoneBB instead of OrigBB.  Without it, a SETCC inside a loop
+  // produces "PHI operand is not in the CFG" and crashes register allocation.
+  DoneBB->splice(DoneBB->begin(), OrigBB,
+                 std::next(MI.getIterator()), OrigBB->end());
+  DoneBB->transferSuccessorsAndUpdatePHIs(OrigBB);
+
+  // OrigBB: TrueReg = 1; jcc → DoneBB (taken when condition holds);
+  //         fall-through → FalseBB
+  Register TrueReg = MRI.createVirtualRegister(RC);
+  BuildMI(OrigBB, DL, TII.get(Mcasm::MOV32ri), TrueReg).addImm(1);
+  BuildMI(OrigBB, DL, TII.get(JccOpc))
+      .addReg(LHSReg).addReg(RHSReg).addMBB(DoneBB);
+  OrigBB->addSuccessor(FalseBB);
+  OrigBB->addSuccessor(DoneBB);
+
+  // FalseBB: FalseReg = 0; fall-through → DoneBB
+  Register FalseReg = MRI.createVirtualRegister(RC);
+  BuildMI(FalseBB, DL, TII.get(Mcasm::MOV32ri), FalseReg).addImm(0);
+  FalseBB->addSuccessor(DoneBB);
+
+  // DoneBB: PHI selects result (TrueReg if jcc taken, else FalseReg)
+  BuildMI(*DoneBB, DoneBB->begin(), DL, TII.get(TargetOpcode::PHI), DstReg)
+      .addReg(TrueReg).addMBB(OrigBB)
+      .addReg(FalseReg).addMBB(FalseBB);
+
+  MI.eraseFromParent();
+  return DoneBB;
 }
 

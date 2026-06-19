@@ -19,10 +19,12 @@
 #include "MCTargetDesc/McasmBaseInfo.h"
 #include "Mcasm.h"
 #include "McasmFrameLowering.h"
+#include "McasmISelLowering.h"
 #include "McasmSubtarget.h"
 #include "McasmTargetMachine.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/SelectionDAGISel.h"
+#include "llvm/CodeGen/SelectionDAGNodes.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/PassRegistry.h"
 #include "llvm/ADT/Twine.h"
@@ -116,6 +118,18 @@ void McasmDAGToDAGISel::Select(SDNode *N) {
   if (N->isMachineOpcode()) {
     LLVM_DEBUG(dbgs() << "== "; N->dump(CurDAG); dbgs() << '\n');
     N->setNodeId(-1);
+    return;
+  }
+
+  // SETCC_DIA → SETCC32rri (expanded later by EmitInstrWithCustomInserter)
+  if (N->getOpcode() == McasmISD::SETCC_DIA) {
+    SDLoc DL(N);
+    ISD::CondCode CC = cast<CondCodeSDNode>(N->getOperand(2))->get();
+    SDValue CCVal = CurDAG->getTargetConstant((int64_t)CC, DL, MVT::i64);
+    SDNode *Res = CurDAG->getMachineNode(
+        Mcasm::SETCC32rri, DL, MVT::i32,
+        {N->getOperand(0), N->getOperand(1), CCVal});
+    ReplaceNode(N, Res);
     return;
   }
 

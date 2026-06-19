@@ -670,33 +670,11 @@ def SAR32mi : Ii32<0xC1, MRM7m, (outs), (ins i32mem:$dst, i32imm:$src),
 // These require special handling for register class exclusions (no RSP/SHP/SBP)
 // Will be added in a future update
 
-//===----------------------------------------------------------------------===//
-// Sub-word load patterns (Legal extloads via word-load + AND/SHL+SAR)
-//
-// mcasm has no byte/halfword memory ops. All loads are 32-bit word loads.
-// The pointer is treated as a word address; byte-lane selection is always 0
-// (low byte/halfword). These patterns satisfy the Legal extload actions set
-// in McasmISelLowering.cpp and stop DAGCombine's load-narrowing loop:
-//   AND(load_i32, mask) -> zextloadi8/16 (Legal) -> these patterns -> done.
-//===----------------------------------------------------------------------===//
-
-// Zero-extending loads
-def : Pat<(i32 (zextloadi1 addr:$ptr)),  (AND32ri (MOV32rm addr:$ptr), 1)>;
-def : Pat<(i32 (zextloadi8 addr:$ptr)),  (AND32ri (MOV32rm addr:$ptr), 255)>;
-def : Pat<(i32 (zextloadi16 addr:$ptr)), (AND32ri (MOV32rm addr:$ptr), 65535)>;
-
-// Any-extending loads (same as zero-extending for this architecture)
-def : Pat<(i32 (extloadi1 addr:$ptr)),   (AND32ri (MOV32rm addr:$ptr), 1)>;
-def : Pat<(i32 (extloadi8 addr:$ptr)),   (AND32ri (MOV32rm addr:$ptr), 255)>;
-def : Pat<(i32 (extloadi16 addr:$ptr)),  (AND32ri (MOV32rm addr:$ptr), 65535)>;
-
-// Sign-extending loads: shift value to top of register, then arithmetic-shift back
-def : Pat<(i32 (sextloadi1 addr:$ptr)),
-          (SAR32ri (SHL32ri (AND32ri (MOV32rm addr:$ptr), 1), 31), 31)>;
-def : Pat<(i32 (sextloadi8 addr:$ptr)),
-          (SAR32ri (SHL32ri (MOV32rm addr:$ptr), 24), 24)>;
-def : Pat<(i32 (sextloadi16 addr:$ptr)),
-          (SAR32ri (SHL32ri (MOV32rm addr:$ptr), 16), 16)>;
+// NOTE: sub-word extloads (zextload/extload/sextload i1/i8/i16) are NOT matched
+// here.  They are Custom-lowered by lowerByteSemanticLoad into a 32-bit word
+// load plus masking, and the masking is itself lowered to __bit_* libcalls
+// (mcasm has no native bit instructions).  Earlier .td patterns that emitted
+// AND32ri/SHL32ri/SAR32ri for these leaked native bit instructions into output.
 
 //===----------------------------------------------------------------------===//
 // NEG_BOOL_MASK: convert boolean (0 or 1) to full-width mask (0 or 0xFFFFFFFF)
@@ -706,4 +684,14 @@ def : Pat<(i32 (sextloadi16 addr:$ptr)),
 
 def : Pat<(i32 (McasmNegBoolMask GR32:$src)),
           (SUB32rr (MOV32ri 0), GR32:$src)>;
+
+//===----------------------------------------------------------------------===//
+// SETCC diamond pseudo (lowered by EmitInstrWithCustomInserter)
+//===----------------------------------------------------------------------===//
+// Expands to: jcc LHS, RHS, TrueBB; FalseBB: dst=0; TrueBB: dst=1; PHI
+let usesCustomInserter = 1 in {
+  def SETCC32rri : I<0, Pseudo, (outs GR32:$dst),
+                     (ins GR32:$lhs, GR32:$rhs, i64imm:$cc),
+                     "SETCC32rri\t$dst, $lhs, $rhs, $cc", []>;
+}
 
