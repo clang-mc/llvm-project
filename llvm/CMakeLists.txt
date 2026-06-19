@@ -1016,7 +1016,7 @@ include(config-ix)
 set(LLVM_DEFAULT_TARGET_TRIPLE_DEFAULT "mcasm")
 
 set(LLVM_DEFAULT_TARGET_TRIPLE "${LLVM_DEFAULT_TARGET_TRIPLE_DEFAULT}" CACHE STRING
-    "Default target for which LLVM will generate code." )
+    "Default target for which LLVM will generate code." FORCE)
 message(STATUS "LLVM default target triple: ${LLVM_DEFAULT_TARGET_TRIPLE}")
 
 set(LLVM_TARGET_TRIPLE "${LLVM_DEFAULT_TARGET_TRIPLE}")
