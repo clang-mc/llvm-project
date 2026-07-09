@@ -10,6 +10,19 @@
 // RUN: %clang --target=mcasm -flto -S %s %s -### 2>&1 | FileCheck %s --check-prefix=LTO-S
 // RUN: %clang --target=mcasm -flto -nostdlib %s -### 2>&1 | FileCheck %s --check-prefix=LTO-NOSTDLIB
 // RUN: not %clang --target=mcasm -flto=thin %s 2>&1 | FileCheck %s --check-prefix=THIN-ERR
+// RUN: %clang --target=mcasm %s -O0 -### 2>&1 | FileCheck %s --check-prefix=MCO0
+// RUN: %clang --target=mcasm %s -O -### 2>&1 | FileCheck %s --check-prefix=MCO1
+// RUN: %clang --target=mcasm %s -O1 -### 2>&1 | FileCheck %s --check-prefix=MCO1
+// RUN: %clang --target=mcasm %s -Os -### 2>&1 | FileCheck %s --check-prefix=MCO1
+// RUN: %clang --target=mcasm %s -Oz -### 2>&1 | FileCheck %s --check-prefix=MCO1
+// RUN: %clang --target=mcasm %s -O2 -### 2>&1 | FileCheck %s --check-prefix=MCO2
+// RUN: %clang --target=mcasm %s -O3 -### 2>&1 | FileCheck %s --check-prefix=MCO2
+// RUN: %clang --target=mcasm %s -O4 -### 2>&1 | FileCheck %s --check-prefix=MCO2
+// RUN: %clang --target=mcasm %s -Ofast -### 2>&1 | FileCheck %s --check-prefix=MCO2
+// RUN: %clang --target=mcasm %s -Og -### 2>&1 | FileCheck %s --check-prefix=MCOG
+// RUN: %clang --target=mcasm %s -g -### 2>&1 | FileCheck %s --check-prefix=MCG
+// RUN: %clang --target=mcasm %s -O3 -g -### 2>&1 | FileCheck %s --check-prefix=MCO2G
+// RUN: %clang --target=mcasm %s -### 2>&1 | FileCheck %s --check-prefix=MCNONE
 
 // S: "-cc1"
 // S-SAME: "-triple" "mcasm"
@@ -82,5 +95,29 @@
 // LTO-NOSTDLIB: "-fmcasm-no-ll-libc"
 
 // THIN-ERR: error: unsupported option '{{.*}}-flto=thin' for target 'mcasm'
+
+// MCO0: clang-mc
+// MCO0-SAME: "-O0"
+
+// MCO1: clang-mc
+// MCO1-SAME: "-O1"
+
+// MCO2: clang-mc
+// MCO2-SAME: "-O2"
+
+// MCOG: clang-mc
+// MCOG-SAME: "-O1"
+// MCOG-SAME: "-g"
+
+// MCG: clang-mc
+// MCG-SAME: "-g"
+
+// MCO2G: clang-mc
+// MCO2G-SAME: "-O2"
+// MCO2G-SAME: "-g"
+
+// MCNONE: clang-mc
+// MCNONE-NOT: "-O
+// MCNONE-NOT: "-g"
 
 int foo(void) { return 1; }

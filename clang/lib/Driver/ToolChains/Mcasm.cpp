@@ -103,6 +103,41 @@ void mcasm::Linker::ConstructJob(Compilation &C, const JobAction &JA,
     ArgStringList CmdArgs;
     AddLinkerInputs(TC, McInputs, Args, CmdArgs, JA);
 
+    // Forward the optimization level and debug flags to clang-mc, mapping the
+    // rich set of clang -O flags onto clang-mc's -O0/-O1/-O2/-g. Mapping:
+    //   -O0                     -> -O0
+    //   -O/-O1/-Os/-Oz          -> -O1
+    //   -O2/-O3/-O4/-Ofast      -> -O2
+    //   -Og                     -> -O1 -g
+    //   -g                      -> -g
+    bool WantDebug = Args.hasArg(clang::options::OPT_g_Flag);
+    if (Arg *A = Args.getLastArg(
+            clang::options::OPT_O0, clang::options::OPT_O,
+            clang::options::OPT_O4, clang::options::OPT_Ofast)) {
+      const Option &Opt = A->getOption();
+      if (Opt.matches(clang::options::OPT_O0)) {
+        CmdArgs.push_back("-O0");
+      } else if (Opt.matches(clang::options::OPT_O4) ||
+                 Opt.matches(clang::options::OPT_Ofast)) {
+        CmdArgs.push_back("-O2");
+      } else {
+        // Joined -O<value>: 1/s/z -> -O1, 2/3 -> -O2, g -> -O1 -g, 0 -> -O0.
+        llvm::StringRef Level = A->getValue();
+        if (Level == "0") {
+          CmdArgs.push_back("-O0");
+        } else if (Level == "1" || Level == "s" || Level == "z") {
+          CmdArgs.push_back("-O1");
+        } else if (Level == "2" || Level == "3") {
+          CmdArgs.push_back("-O2");
+        } else if (Level == "g") {
+          CmdArgs.push_back("-O1");
+          WantDebug = true;
+        }
+      }
+    }
+    if (WantDebug)
+      CmdArgs.push_back("-g");
+
     for (Arg *A : Args.filtered(clang::options::OPT_Xclang_mc)) {
       A->claim();
       CmdArgs.push_back(A->getValue());
