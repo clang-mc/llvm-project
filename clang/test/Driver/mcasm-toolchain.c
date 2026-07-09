@@ -107,27 +107,27 @@
 
 // THIN-ERR: error: unsupported option '{{.*}}-flto=thin' for target 'mcasm'
 
-// MCO0: clang-mc
+// MCO0: "{{.*}}clang-mc
 // MCO0-SAME: "-O0"
 
-// MCO1: clang-mc
+// MCO1: "{{.*}}clang-mc
 // MCO1-SAME: "-O1"
 
-// MCO2: clang-mc
+// MCO2: "{{.*}}clang-mc
 // MCO2-SAME: "-O2"
 
-// MCOG: clang-mc
+// MCOG: "{{.*}}clang-mc
 // MCOG-SAME: "-O1"
 // MCOG-SAME: "-g"
 
-// MCG: clang-mc
+// MCG: "{{.*}}clang-mc
 // MCG-SAME: "-g"
 
-// MCO2G: clang-mc
+// MCO2G: "{{.*}}clang-mc
 // MCO2G-SAME: "-O2"
 // MCO2G-SAME: "-g"
 
-// MCNONE: clang-mc
+// MCNONE: "{{.*}}clang-mc
 // MCNONE-NOT: "-O
 // MCNONE-NOT: "-g"
 

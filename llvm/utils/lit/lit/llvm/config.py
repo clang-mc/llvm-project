@@ -398,18 +398,22 @@ class LLVMConfig(object):
 
     # Normalize 3-field target triple to 4-field triple with "unknown" as environment
     def normalize_triple(self, triple):
-        compoments = triple.split("-", maxsplit=3)
-        if len(compoments) == 4:
-            return triple
-        assert len(compoments) == 3
-        return triple + "-unknown"
+        components = triple.split("-", maxsplit=3)
+        # Pad short/underspecified triples (e.g. the single-component 'mcasm'
+        # default triple) up to the canonical arch-vendor-os-env 4-component
+        # form. Fully specified triples are returned unchanged.
+        while len(components) < 4:
+            components.append("unknown")
+        return "-".join(components)
 
     def make_itanium_abi_triple(self, triple):
         m = re.match(r"(\w+)-(\w+)-(\w+)", triple)
         if not m:
-            self.lit_config.fatal(
-                "Could not turn '%s' into Itanium ABI triple" % triple
-            )
+            # Some targets use a single-component triple that does not
+            # decompose into arch-vendor-os (e.g. the mcasm default triple).
+            # Such targets don't use the Itanium ABI machinery, so fall back to
+            # the triple unchanged rather than aborting the whole test suite.
+            return triple
         if m.group(3).lower() != "windows":
             # All non-windows triples use the Itanium ABI.
             return triple
@@ -418,7 +422,9 @@ class LLVMConfig(object):
     def make_msabi_triple(self, triple):
         m = re.match(r"(\w+)-(\w+)-(\w+)", triple)
         if not m:
-            self.lit_config.fatal("Could not turn '%s' into MS ABI triple" % triple)
+            # Single-component triples (e.g. the mcasm default triple) have no
+            # MS ABI variant; use a sensible x86 default rather than aborting.
+            return "i686-pc-windows-msvc"
         isa = m.group(1).lower()
         vendor = m.group(2).lower()
         os = m.group(3).lower()
