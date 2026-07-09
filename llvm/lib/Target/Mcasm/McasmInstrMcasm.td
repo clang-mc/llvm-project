@@ -190,17 +190,29 @@ def PseudoCALL_extern : Pseudo<(outs), (ins bare_symbol:$dst),
                                "call\t$dst">;
 
 // TAIL - Tail call (optimized as JMP)
-// Tail calls jump directly to the callee without setting up a return address
-// The callee will return directly to our caller
+// Tail calls jump directly to the callee without setting up a return address;
+// the callee's RET returns directly to our caller (mcasm keeps the return
+// address on an implicit, rsp-independent call stack).
+//
+// Only same-module *defined* functions may be tail-called via JMP: per the ISA
+// (ZH_Instruction-Set.md L39) JMP/Jcc cannot target an external label, so tail
+// calls to extern/undefined/libcall symbols fall back to CALL+RET and are never
+// lowered to PseudoTAIL (see IsEligibleForTailCallOptimization). Hence there is
+// deliberately no "jmp <extern>" tail variant.
 let isCall = 1, isTerminator = 1, isReturn = 1, isBarrier = 1,
     isPseudo = 0, isCodeGenOnly = 0, Uses = [rsp] in {
   def PseudoTAIL : Pseudo<(outs), (ins bare_symbol:$dst),
                           [(Mcasmtc_return tglobaladdr:$dst)],
                           "jmp\t$dst">;
+}
 
-  def PseudoTAIL_extern : Pseudo<(outs), (ins bare_symbol:$dst),
-                                 [(Mcasmtc_return texternalsym:$dst)],
-                                 "jmp\t$dst">;
+// Indirect tail call through a function pointer / label reference in a GR32.
+// Emits JMPD (dynamic jump); the callee's RET returns to our caller.
+let isCall = 1, isTerminator = 1, isReturn = 1, isBarrier = 1,
+    isIndirectBranch = 1, isPseudo = 0, isCodeGenOnly = 0, Uses = [rsp] in {
+  def PseudoTAILr : Pseudo<(outs), (ins GR32:$dst),
+                           [(Mcasmtc_return GR32:$dst)],
+                           "jmpd\t$dst">;
 }
 
 //===----------------------------------------------------------------------===//

@@ -136,6 +136,14 @@ public:
                       const SmallVectorImpl<SDValue> &OutVals, const SDLoc &dl,
                       SelectionDAG &DAG) const override;
 
+  /// Decide whether a call marked as a tail call in the IR can actually be
+  /// lowered as a mcasm tail call (JMP/JMPD to the callee). \p ArgLocs and
+  /// \p CCInfo are the already-analyzed outgoing argument locations for the
+  /// call. Returns false to fall back to a normal CALL+RET.
+  bool IsEligibleForTailCallOptimization(
+      TargetLowering::CallLoweringInfo &CLI,
+      const SmallVectorImpl<CCValAssign> &ArgLocs, CCState &CCInfo) const;
+
   /// Prevent LLVM from transforming division to shift
   /// mcasm does not support shift operations
   bool shouldAvoidTransformToShift(EVT VT, unsigned Amount) const override {

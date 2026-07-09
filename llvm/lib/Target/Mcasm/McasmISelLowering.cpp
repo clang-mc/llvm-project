@@ -536,6 +536,12 @@ SDValue McasmTargetLowering::LowerFormalArguments(
     }
   }
 
+  // Record the size (in bytes) of this function's incoming stack-argument area
+  // so tail-call lowering can verify a callee's outgoing stack arguments fit
+  // within it. The vararg path below overwrites this with the same value.
+  MF.getInfo<McasmMachineFunctionInfo>()->setArgumentStackSize(
+      CCInfo.getStackSize());
+
   if (isVarArg) {
     static const MCPhysReg ArgRegs[] = {Mcasm::r0, Mcasm::r1, Mcasm::r2,
                                         Mcasm::r3, Mcasm::r4, Mcasm::r5,
@@ -585,6 +591,73 @@ SDValue McasmTargetLowering::LowerFormalArguments(
   return Chain;
 }
 
+bool McasmTargetLowering::IsEligibleForTailCallOptimization(
+    CallLoweringInfo &CLI, const SmallVectorImpl<CCValAssign> &ArgLocs,
+    CCState &CCInfo) const {
+  SelectionDAG &DAG = CLI.DAG;
+  MachineFunction &MF = DAG.getMachineFunction();
+  const Function &CallerF = MF.getFunction();
+  CallingConv::ID CallerCC = CallerF.getCallingConv();
+  CallingConv::ID CalleeCC = CLI.CallConv;
+  SDValue Callee = CLI.Callee;
+
+  // Return-value correctness and tail-call *position* (the caller returns the
+  // callee's value, compatible return attributes) are already guaranteed by
+  // isInTailCallPosition(), which gates CLI.IsTailCall before we get here (or
+  // by the frontend for musttail). We only validate mcasm ABI constraints.
+
+  // Only C / fastcc, and the caller and callee must use the same convention so
+  // their callee-saved sets and argument layouts agree.
+  auto isSupportedCC = [](CallingConv::ID CC) {
+    return CC == CallingConv::C || CC == CallingConv::Fast;
+  };
+  if (!isSupportedCC(CallerCC) || !isSupportedCC(CalleeCC) ||
+      CallerCC != CalleeCC)
+    return false;
+
+  // Variadic calls use a register-save area / non-trivial argument layout that
+  // the tail path does not reconstruct.
+  if (CLI.IsVarArg || CallerF.isVarArg())
+    return false;
+
+  // Byval arguments (indirect memory copies) are not handled on the tail path.
+  for (const ISD::OutputArg &Out : CLI.Outs)
+    if (Out.Flags.isByVal())
+      return false;
+
+  // Outgoing stack arguments are written into the caller's *incoming* argument
+  // area and the callee reads them there after our epilogue restores rsp. That
+  // is only safe if the callee needs no more stack-argument space than our
+  // caller reserved for us; otherwise we would clobber the caller's frame.
+  unsigned NumBytesOut = CCInfo.getStackSize();
+  unsigned CallerArgStackSize =
+      MF.getInfo<McasmMachineFunctionInfo>()->getArgumentStackSize();
+  if (NumBytesOut > CallerArgStackSize)
+    return false;
+
+  // Determine whether the callee is reachable by JMP/JMPD.
+  if (auto *G = dyn_cast<GlobalAddressSDNode>(Callee)) {
+    const GlobalValue *GV = G->getGlobal();
+    const auto *F = dyn_cast<Function>(GV);
+    // Per the ISA, JMP/Jcc cannot target an external label. The backend emits
+    // `extern ns:fn` for imported/undefined functions, so only a function
+    // *defined* in this module (and not interposable) has a JMP-able local
+    // label.
+    if (!F || F->isDeclarationForLinker() || F->hasDLLImportStorageClass() ||
+        GV->isInterposable())
+      return false;
+    return true;
+  }
+
+  // Libcalls / runtime symbols also become `extern` labels -> not JMP-able.
+  if (isa<ExternalSymbolSDNode>(Callee))
+    return false;
+
+  // Indirect call through a register value (function pointer / label
+  // reference): JMPD can target it.
+  return true;
+}
+
 SDValue McasmTargetLowering::LowerCall(
     CallLoweringInfo &CLI, SmallVectorImpl<SDValue> &InVals) const {
   SelectionDAG &DAG = CLI.DAG;
@@ -606,14 +679,15 @@ SDValue McasmTargetLowering::LowerCall(
   // Get the size of the outgoing arguments stack space
   unsigned NumBytes = CCInfo.getStackSize();
 
-  // Check if tail call is possible
-  // For now, only allow tail calls with no stack arguments
-  if (IsTailCall && NumBytes > 0) {
-    IsTailCall = false;  // Cannot tail call with stack arguments
-  }
+  // Decide whether this call can really be lowered as a mcasm tail call
+  // (JMP/JMPD to the callee). If not, fall back to a normal CALL+RET.
+  if (IsTailCall)
+    IsTailCall = IsEligibleForTailCallOptimization(CLI, ArgLocs, CCInfo);
 
-  // Adjust stack if needed
-  if (NumBytes > 0) {
+  // A tail call reuses the caller's incoming argument area for any outgoing
+  // stack arguments (see below) and therefore emits no call-frame sequence.
+  // Only a normal call brackets its stack arguments with CALLSEQ_START/END.
+  if (!IsTailCall && NumBytes > 0) {
     Chain = DAG.getCALLSEQ_START(Chain, NumBytes, 0, dl);
   }
 
@@ -690,14 +764,29 @@ SDValue McasmTargetLowering::LowerCall(
     } else {
       // Stack argument
       assert(VA.isMemLoc() && "Expected memory location");
-      // CCState stack offsets are already byte offsets and must remain so
-      // until the final direct word memory operand is formed.
       int64_t ByteOff = VA.getLocMemOffset();
-      SDValue PtrOff = DAG.getIntPtrConstant(ByteOff, dl);
-      PtrOff = DAG.getNode(ISD::ADD, dl, MVT::i32,
-                           DAG.getRegister(Mcasm::rsp, MVT::i32), PtrOff);
-      MemOpChains.push_back(DAG.getStore(Chain, dl, Arg, PtrOff,
-                                         MachinePointerInfo()));
+      if (IsTailCall) {
+        // Reuse the caller's incoming argument area: store to the fixed frame
+        // object at the same offset. mcasm keeps no return address on the data
+        // stack, so incoming and outgoing stack-argument offsets both start at
+        // 0 and line up one-to-one. The store executes while our frame is still
+        // set up (resolved to [rsp+framesize+off]); the epilogue then restores
+        // rsp so the callee reads the value at [rsp+off].
+        MachineFunction &MFn = DAG.getMachineFunction();
+        int FI = MFn.getFrameInfo().CreateFixedObject(4, ByteOff,
+                                                      /*IsImmutable=*/false);
+        SDValue FIN = DAG.getFrameIndex(FI, MVT::i32);
+        MemOpChains.push_back(DAG.getStore(
+            Chain, dl, Arg, FIN, MachinePointerInfo::getFixedStack(MFn, FI)));
+      } else {
+        // CCState stack offsets are already byte offsets and must remain so
+        // until the final direct word memory operand is formed.
+        SDValue PtrOff = DAG.getIntPtrConstant(ByteOff, dl);
+        PtrOff = DAG.getNode(ISD::ADD, dl, MVT::i32,
+                             DAG.getRegister(Mcasm::rsp, MVT::i32), PtrOff);
+        MemOpChains.push_back(DAG.getStore(Chain, dl, Arg, PtrOff,
+                                           MachinePointerInfo()));
+      }
     }
   }
 
@@ -1296,6 +1385,9 @@ SDValue McasmTargetLowering::LowerOperation(SDValue Op, SelectionDAG &DAG) const
       Mask = 0xFFFF;
       Bias = 0x8000;
       break;
+    case MVT::i32:
+      // sign_extend_inreg(x, i32) is a no-op when the value is already i32.
+      return Op.getOperand(0);
     default:
       break;
     }
@@ -1757,8 +1849,8 @@ SDValue McasmTargetLowering::lowerCTTZ(SDValue Op, SelectionDAG &DAG) const {
   if (Op.getOpcode() == ISD::CTTZ_ZERO_UNDEF)
     return Sum; // x=0 琛屼负鏈畾涔夛紝鏃犻渶澶勭悊
 
-  // CTTZ(0) = 32锛欼sZero = XOR(IsNonzero(X), 1)锛孍xtra = IsZero << 5
-  SDValue IsZero = DAG.getNode(ISD::XOR, DL, MVT::i32, IsNonzero(X), C1);
+  // CTTZ(0) = 32: IsZero = 1 - IsNonzero(X) (SUB is Legal; avoids __bit_xor libcall)
+  SDValue IsZero = DAG.getNode(ISD::SUB, DL, MVT::i32, C1, IsNonzero(X));
   SDValue Extra  = DAG.getNode(ISD::SHL, DL, MVT::i32, IsZero,
                                 DAG.getConstant(5, DL, MVT::i32));
   return DAG.getNode(ISD::ADD, DL, MVT::i32, Sum, Extra);
