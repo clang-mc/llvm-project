@@ -6432,6 +6432,8 @@ def save_temps : Flag<["-", "--"], "save-temps">, Flags<[NoXarchOption]>,
   HelpText<"Alias for --save-temps=cwd">;
 def fmcasm_no_ll_libc : Flag<["-"], "fmcasm-no-ll-libc">,
   Flags<[HelpHidden]>, Visibility<[CC1Option]>;
+def fmcasm_no_ll_libmc : Flag<["-"], "fmcasm-no-ll-libmc">,
+  Flags<[HelpHidden]>, Visibility<[CC1Option]>;
 def fmcasm_anonymize_static_data : Flag<["-"], "fmcasm-anonymize-static-data">,
   Flags<[HelpHidden]>, Visibility<[ClangOption, CC1Option]>;
 def save_stats_EQ : Joined<["-", "--"], "save-stats=">, Flags<[NoXarchOption]>,

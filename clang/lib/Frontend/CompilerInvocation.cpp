@@ -1909,6 +1909,7 @@ bool CompilerInvocation::ParseCodeGenArgs(CodeGenOptions &Opts, ArgList &Args,
   }
 
   Opts.McasmNoStdLibInclude = Args.hasArg(OPT_fmcasm_no_ll_libc);
+  Opts.McasmNoLibmcInclude = Args.hasArg(OPT_fmcasm_no_ll_libmc);
   Opts.McasmAnonymizeStaticData =
       Args.hasArg(OPT_fmcasm_anonymize_static_data);
 

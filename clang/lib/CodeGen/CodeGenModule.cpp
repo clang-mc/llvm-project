@@ -1483,6 +1483,8 @@ void CodeGenModule::Release() {
 
   if (T.getArch() == llvm::Triple::mcasm && !CodeGenOpts.McasmNoStdLibInclude)
     getModule().addModuleFlag(llvm::Module::Override, "mcasm-libc-include", 1);
+  if (T.getArch() == llvm::Triple::mcasm && !CodeGenOpts.McasmNoLibmcInclude)
+    getModule().addModuleFlag(llvm::Module::Override, "mcasm-libmc-include", 1);
   if (T.getArch() == llvm::Triple::mcasm &&
       CodeGenOpts.McasmAnonymizeStaticData)
     getModule().addModuleFlag(llvm::Module::Override,

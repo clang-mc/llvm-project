@@ -525,6 +525,8 @@ void McasmAsmPrinter::emitStartOfAsmFile(Module &M) {
   OutStreamer->emitRawText("#include \"_ll_std\"");
   if (M.getModuleFlag("mcasm-libc-include"))
     OutStreamer->emitRawText("#include \"_ll_libc\"");
+  if (M.getModuleFlag("mcasm-libmc-include"))
+    OutStreamer->emitRawText("#include \"_ll_libmc\"");
   bool HasMainDefinition = llvm::any_of(M, [](const Function &F) {
     return !F.isDeclaration() && F.getName() == "main";
   });
