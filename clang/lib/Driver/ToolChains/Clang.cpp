@@ -5460,12 +5460,16 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
   CmdArgs.push_back("-main-file-name");
   CmdArgs.push_back(getBaseInputName(Args, Input));
 
-  if (Triple.getArch() == llvm::Triple::mcasm &&
-      Args.hasArg(options::OPT_nostdlib))
-    CmdArgs.push_back("-fmcasm-no-ll-libc");
-  if (Triple.getArch() == llvm::Triple::mcasm &&
-      Args.hasArg(options::OPT_fmcasm_anonymize_static_data))
-    CmdArgs.push_back("-fmcasm-anonymize-static-data");
+  if (Triple.getArch() == llvm::Triple::mcasm) {
+    // -nostdlib or -ffreestanding suppresses the automatic libc header.
+    if (Args.hasArg(options::OPT_nostdlib, options::OPT_ffreestanding))
+      CmdArgs.push_back("-fmcasm-no-ll-libc");
+    // -ffreestanding also suppresses the automatic libmc header.
+    if (Args.hasArg(options::OPT_ffreestanding))
+      CmdArgs.push_back("-fmcasm-no-ll-libmc");
+    if (Args.hasArg(options::OPT_fmcasm_anonymize_static_data))
+      CmdArgs.push_back("-fmcasm-anonymize-static-data");
+  }
 
   // Some flags which affect the language (via preprocessor
   // defines).

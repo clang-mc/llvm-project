@@ -4,6 +4,8 @@
 // RUN: %clang --target=mcasm %s -o demo -### 2>&1 | FileCheck %s --check-prefix=OUT
 // RUN: %clang --target=mcasm %s -Xclang-mc --namespace -Xclang-mc ns:test -### 2>&1 | FileCheck %s --check-prefix=XMC --implicit-check-not=unused-command-line-argument
 // RUN: %clang --target=mcasm -nostdlib -S %s -### 2>&1 | FileCheck %s --check-prefix=NOSTDLIB
+// RUN: %clang --target=mcasm -ffreestanding -S %s -### 2>&1 | FileCheck %s --check-prefix=FREESTANDING
+// RUN: %clang --target=mcasm -S %s -### 2>&1 | FileCheck %s --check-prefix=HOSTED
 // RUN: %clang --target=mcasm -flto %s -### 2>&1 | FileCheck %s --check-prefix=LTO
 // RUN: %clang --target=mcasm -flto %s -o demo -### 2>&1 | FileCheck %s --check-prefix=LTO-OUT
 // RUN: %clang --target=mcasm -flto %s -Xclang-mc --namespace -Xclang-mc ns:test -### 2>&1 | FileCheck %s --check-prefix=LTO-XMC --implicit-check-not=unused-command-line-argument
@@ -54,6 +56,15 @@
 // XMC: "--namespace" "ns:test"
 
 // NOSTDLIB: "-fmcasm-no-ll-libc"
+// NOSTDLIB-NOT: "-fmcasm-no-ll-libmc"
+
+// -ffreestanding suppresses both the libc and libmc auto-includes.
+// FREESTANDING: "-fmcasm-no-ll-libc"
+// FREESTANDING: "-fmcasm-no-ll-libmc"
+
+// A plain hosted compile keeps both auto-includes.
+// HOSTED-NOT: "-fmcasm-no-ll-libc"
+// HOSTED-NOT: "-fmcasm-no-ll-libmc"
 
 // LTO: "-cc1"
 // LTO-SAME: "-triple" "mcasm"
