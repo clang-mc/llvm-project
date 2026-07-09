@@ -49,13 +49,13 @@ static SmallString<128> getClangSiblingLibcIncludeDir(StringRef ResourceDir) {
   return P;
 }
 
-static SmallString<128> getClangSiblingLibmcDir(StringRef ResourceDir) {
+static SmallString<128> getClangSiblingLibmcIncludeDir(StringRef ResourceDir) {
   SmallString<128> P(ResourceDir);
   // ResourceDir is expected to be <install>/lib/clang/<version>.
-  // Convert it to <install>/libmc, i.e. %path_to_clang%/../libmc.
+  // Convert it to <install>/libmc/include, i.e. %path_to_clang%/../libmc/include.
   for (int I = 0; I < 3; ++I)
     llvm::sys::path::remove_filename(P);
-  llvm::sys::path::append(P, "libmc");
+  llvm::sys::path::append(P, "libmc", "include");
   return P;
 }
 
@@ -219,7 +219,7 @@ void InitHeaderSearch::AddDefaultCIncludePaths(const llvm::Triple &triple,
     AddUnmappedPath(P, ExternCSystem, false);
     SmallString<128> LibcP = getClangSiblingLibcIncludeDir(HSOpts.ResourceDir);
     AddUnmappedPath(LibcP, ExternCSystem, false);
-    SmallString<128> LibmcP = getClangSiblingLibmcDir(HSOpts.ResourceDir);
+    SmallString<128> LibmcP = getClangSiblingLibmcIncludeDir(HSOpts.ResourceDir);
     AddUnmappedPath(LibmcP, ExternCSystem, false);
   }
 
