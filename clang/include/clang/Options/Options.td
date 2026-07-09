@@ -6436,6 +6436,9 @@ def fmcasm_no_ll_libmc : Flag<["-"], "fmcasm-no-ll-libmc">,
   Flags<[HelpHidden]>, Visibility<[CC1Option]>;
 def fmcasm_anonymize_static_data : Flag<["-"], "fmcasm-anonymize-static-data">,
   Flags<[HelpHidden]>, Visibility<[ClangOption, CC1Option]>;
+def enable_obf : Flag<["-", "--"], "enable-obf">,
+  Flags<[NoXarchOption]>, Visibility<[ClangOption]>,
+  HelpText<"Enable obfuscation (forwarded to clang-mc)">;
 def save_stats_EQ : Joined<["-", "--"], "save-stats=">, Flags<[NoXarchOption]>,
   HelpText<"Save llvm statistics.">;
 def save_stats : Flag<["-", "--"], "save-stats">, Flags<[NoXarchOption]>,

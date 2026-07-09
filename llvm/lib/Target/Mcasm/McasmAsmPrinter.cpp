@@ -848,12 +848,12 @@ void McasmAsmPrinter::emitFunctionEntryLabel() {
           (int)IsDLLExport, (int)IsDLLImport);
 
   if (IsDLLExport) {
-    // __declspec(dllexport): export _ll_shared:funcname:
+    // __declspec(dllexport): api _ll_shared:funcname:
     // NOTE: The symbol name already includes _ll_shared: prefix (added by getTargetSymbol)
-    std::string Label = "export ";
+    std::string Label = "api ";
     Label += FnSym->getName();
     Label += ":";
-    MCASM_DEBUG_LOG("DEBUG:   Emitting export label: %s\n", Label.c_str());
+    MCASM_DEBUG_LOG("DEBUG:   Emitting api label: %s\n", Label.c_str());
     OutStreamer->emitRawText(Label);
   } else if (IsDLLImport) {
     // __declspec(dllimport): extern _ll_shared:funcname:

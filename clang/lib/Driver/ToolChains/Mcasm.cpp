@@ -138,6 +138,11 @@ void mcasm::Linker::ConstructJob(Compilation &C, const JobAction &JA,
     if (WantDebug)
       CmdArgs.push_back("-g");
 
+    if (Arg *A = Args.getLastArg(clang::options::OPT_enable_obf)) {
+      A->claim();
+      CmdArgs.push_back("--enable-obf");
+    }
+
     for (Arg *A : Args.filtered(clang::options::OPT_Xclang_mc)) {
       A->claim();
       CmdArgs.push_back(A->getValue());
