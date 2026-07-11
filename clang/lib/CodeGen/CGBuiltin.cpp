@@ -2643,6 +2643,78 @@ static RValue EmitHipStdParUnsupportedBuiltin(CodeGenFunction *CGF,
   return RValue::get(CGF->Builder.CreateCall(UBF, Args));
 }
 
+// Format an APFloat as the shortest round-trippable decimal in *fixed-point*
+// notation (no 'E' exponent), for the mcasm __builtin_mcf_ftoa fold. Minecraft's
+// SNBT number parser rejects scientific notation, and APFloat::toString couples
+// its precision knob to its fixed/scientific choice, so we do it in two steps:
+//   1. probe increasing significant-digit counts until the value round-trips;
+//   2. splice the decimal point into those digits ourselves.
+// Special values (nan/inf) are handled by the caller.
+static void mcfFormatShortestFixed(const llvm::APFloat &V,
+                                   SmallVectorImpl<char> &Out) {
+  const llvm::fltSemantics &Sem = V.getSemantics();
+
+  // Canonical scientific form ("d.dddE+n") of the shortest digit count that
+  // uniquely restores V. FormatMaxPadding=0 forces scientific, giving a stable
+  // shape to parse. Doubles need at most 17 significant digits.
+  SmallString<32> Sci;
+  for (unsigned Prec = 1; Prec <= 17; ++Prec) {
+    Sci.clear();
+    V.toString(Sci, Prec, /*FormatMaxPadding=*/0);
+    llvm::APFloat RT(Sem);
+    llvm::Expected<llvm::APFloat::opStatus> St =
+        RT.convertFromString(Sci, llvm::APFloat::rmNearestTiesToEven);
+    if (!St) {
+      llvm::consumeError(St.takeError());
+      continue;
+    }
+    if (RT.bitwiseIsEqual(V))
+      break;
+  }
+
+  // Decompose "[-]d.ddddE[+-]n" into sign, mantissa digits and decimal exponent.
+  StringRef S = Sci;
+  bool Neg = S.consume_front("-");
+  size_t EPos = S.find('E');
+  StringRef Mant = S.substr(0, EPos);
+  int Exp10 = 0;
+  StringRef ExpStr = S.substr(EPos + 1);
+  ExpStr.consume_front("+"); // StringRef::getAsInteger rejects a leading '+'.
+  ExpStr.getAsInteger(10, Exp10);
+
+  // Gather the mantissa digits (drop the '.') and strip trailing zeros.
+  SmallString<20> Digits;
+  for (char C : Mant)
+    if (C != '.')
+      Digits.push_back(C);
+  while (Digits.size() > 1 && Digits.back() == '0')
+    Digits.pop_back();
+
+  if (Neg)
+    Out.push_back('-');
+
+  // Exp10 is the power of ten of the leading digit, i.e. the decimal point sits
+  // (Exp10 + 1) places right of the string start.
+  int IntDigits = Exp10 + 1;
+  int NDigits = static_cast<int>(Digits.size());
+  if (IntDigits >= NDigits) {
+    // Whole number, pad with trailing zeros: "1" @Exp10=5 -> "100000".
+    Out.append(Digits.begin(), Digits.end());
+    Out.append(IntDigits - NDigits, '0');
+  } else if (IntDigits > 0) {
+    // Point falls inside the digits: "314" @Exp10=0 -> "3.14".
+    Out.append(Digits.begin(), Digits.begin() + IntDigits);
+    Out.push_back('.');
+    Out.append(Digits.begin() + IntDigits, Digits.end());
+  } else {
+    // Pure fraction: "5" @Exp10=-1 -> "0.5"; leading zeros as needed.
+    Out.push_back('0');
+    Out.push_back('.');
+    Out.append(-IntDigits, '0');
+    Out.append(Digits.begin(), Digits.end());
+  }
+}
+
 RValue CodeGenFunction::EmitBuiltinExpr(const GlobalDecl GD, unsigned BuiltinID,
                                         const CallExpr *E,
                                         ReturnValueSlot ReturnValue) {
@@ -6477,6 +6549,40 @@ RValue CodeGenFunction::EmitBuiltinExpr(const GlobalDecl GD, unsigned BuiltinID,
         cast<DeclRefExpr>(E->getArg(0)->IgnoreImpCasts())->getDecl());
     auto Str = CGM.GetAddrOfConstantCString(Name, "");
     return RValue::get(Str.getPointer());
+  }
+
+  case Builtin::BI__builtin_mcf_ftoa: {
+    // Mcasm target helper: for a compile-time-constant double argument, fold to
+    // a decimal string literal in .rodata (zero runtime soft-float). For a
+    // non-constant argument, degrade to a call to the runtime helper
+    // `const char *__mcf_ftoa(double)` -- never hard error (see task contract).
+    const Expr *Arg = E->getArg(0);
+
+    Expr::EvalResult Eval;
+    if (Arg->EvaluateAsRValue(Eval, getContext()) && Eval.Val.isFloat()) {
+      llvm::APFloat V = Eval.Val.getFloat();
+
+      SmallString<32> S;
+      if (V.isNaN())
+        S = "nan";
+      else if (V.isInfinity())
+        S = V.isNegative() ? "-inf" : "inf";
+      else
+        // Shortest round-trippable decimal in fixed-point notation (Minecraft's
+        // SNBT parser rejects the "1.0E+0" scientific form).
+        mcfFormatShortestFixed(V, S);
+
+      auto GV = CGM.GetAddrOfConstantCString(std::string(S), ".mcf.ftoa");
+      return RValue::get(GV.getPointer());
+    }
+
+    // Non-constant: emit a call to the runtime fallback __mcf_ftoa.
+    llvm::Value *Arg0 = EmitScalarExpr(Arg);
+    llvm::Type *DoubleTy = ConvertType(getContext().DoubleTy);
+    llvm::FunctionType *FTy =
+        llvm::FunctionType::get(Int8PtrTy, {DoubleTy}, /*isVarArg=*/false);
+    llvm::FunctionCallee Fn = CGM.CreateRuntimeFunction(FTy, "__mcf_ftoa");
+    return RValue::get(Builder.CreateCall(Fn, {Arg0}));
   }
   }
 

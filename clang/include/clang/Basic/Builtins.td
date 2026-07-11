@@ -5005,6 +5005,14 @@ def GetDeviceSideMangledName : LangBuiltin<"CUDA_LANG"> {
   let Prototype = "char const*(...)";
 }
 
+// Mcasm (Minecraft) target: constant-fold a double to its decimal string at
+// compile time; degrade to a call to the runtime helper __mcf_ftoa otherwise.
+def BuiltinMcfFtoa : Builtin {
+  let Spellings = ["__builtin_mcf_ftoa"];
+  let Attributes = [NoThrow, Const];
+  let Prototype = "char const*(double)";
+}
+
 // HLSL
 def HLSLAddUint64: LangBuiltin<"HLSL_LANG"> {
   let Spellings = ["__builtin_hlsl_adduint64"];
