@@ -3249,7 +3249,12 @@ SDValue DAGCombiner::visitADD(SDNode *N) {
     return V;
 
   // fold (a+b) -> (a|b) iff a and b share no bits.
+  // MCASM: mcasm has no native OR (it is a __bit_or libcall); a disjoint add is
+  // strictly cheaper as a native ADD, and the backend deliberately rewrites
+  // disjoint OR back into ADD.  Skip this canonicalization so the two do not
+  // ping-pong.
   if ((!LegalOperations || TLI.isOperationLegal(ISD::OR, VT)) &&
+      TLI.getTargetMachine().getTargetTriple().getArch() != llvm::Triple::mcasm &&
       DAG.haveNoCommonBitsSet(N0, N1))
     return DAG.getNode(ISD::OR, DL, VT, N0, N1, SDNodeFlags::Disjoint);
 
@@ -4815,8 +4820,16 @@ template <class MatchContextClass> SDValue DAGCombiner::visitMUL(SDNode *N) {
   if (N1IsConst && ConstValue1.isAllOnes())
     return Matcher.getNode(ISD::SUB, DL, VT, DAG.getConstant(0, DL, VT), N0);
 
+  // MCASM: mcasm has no native shift instruction; constant shifts are lowered
+  // to native mul/div by the backend.  Folding mul-by-pow2 back into a shift
+  // would bounce it through the Custom shift lowering into a __bit_* libcall,
+  // creating a lower/combine ping-pong.  Keep the mul as-is for mcasm so the
+  // backend selects a native MUL32ri.  (Mirrors the sdiv-by-pow2 guard below.)
+  bool isMcasmTarget = TLI.getTargetMachine().getTargetTriple().getArch() ==
+                       llvm::Triple::mcasm;
+
   // fold (mul x, (1 << c)) -> x << c
-  if (isConstantOrConstantVector(N1, /*NoOpaques*/ true) &&
+  if (!isMcasmTarget && isConstantOrConstantVector(N1, /*NoOpaques*/ true) &&
       (!VT.isVector() || Level <= AfterLegalizeVectorOps)) {
     if (SDValue LogBase2 = BuildLogBase2(N1, DL)) {
       EVT ShiftVT = getShiftAmountTy(N0.getValueType());
@@ -4829,7 +4842,8 @@ template <class MatchContextClass> SDValue DAGCombiner::visitMUL(SDNode *N) {
   }
 
   // fold (mul x, -(1 << c)) -> -(x << c) or (-x) << c
-  if (N1IsConst && !N1IsOpaqueConst && ConstValue1.isNegatedPowerOf2()) {
+  if (!isMcasmTarget && N1IsConst && !N1IsOpaqueConst &&
+      ConstValue1.isNegatedPowerOf2()) {
     unsigned Log2Val = (-ConstValue1).logBase2();
 
     // FIXME: If the input is something that is easily negated (e.g. a

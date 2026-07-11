@@ -22,9 +22,13 @@ define i32 @main() #0 {
 
 attributes #0 = { noinline nounwind optnone }
 
+; The byte store (store i8 0) is expanded to a native word read-modify-write
+; using mul/div instead of __bit_* libcalls, which uses a few extra stack
+; slots at -O0 and shifts the struct field offsets accordingly.  The frame
+; index + offset addressing for the struct fields must still be correct.
 ; CHECK-LABEL: main:
 ; CHECK:      sub rsp,
-; CHECK:      add [[CAP:r[0-9]+]], 12
+; CHECK:      add [[CAP:r[0-9]+]], 20
 ; CHECK:      mov {{.*}}, [[CAP]]
 ; CHECK:      mov {{\[}}[[CAP]]{{\]}}, 64
 ; CHECK:      mov rax, [{{.*}}]

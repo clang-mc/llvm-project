@@ -66,16 +66,17 @@ entry:
 ; CHECK-NOT: __bit_shr
 ; CHECK-NOT: bytes+
 
+; The i1 load masks with (& 1), now lowered to native arithmetic instead of a
+; __bit_and libcall.
 ; CHECK-LABEL: load_i1:
 ; CHECK: mov [[F:r[0-9]+]], flag
-; CHECK: mov [[F]], {{\[}}[[F]]{{\]}}
-; CHECK: mov r1, 1
-; CHECK: call __bit_and
+; CHECK: mov {{[a-z0-9]+}}, {{\[}}[[F]]{{\]}}
+; CHECK-NOT: call __bit_and
 
 ; CHECK-LABEL: load_i1_branch:
 ; CHECK: mov [[AF:r[0-9]+]], flag
-; CHECK: mov [[AF]], {{\[}}[[AF]]{{\]}}
-; CHECK: call __bit_and
+; CHECK: mov {{[a-z0-9]+}}, {{\[}}[[AF]]{{\]}}
+; CHECK-NOT: call __bit_and
 
 ; CHECK-LABEL: load_half_1:
 ; CHECK: mov [[H:r[0-9]+]], halves
@@ -87,17 +88,17 @@ entry:
 ; CHECK: mov [[SB:[rx][0-9]+]], bytes
 ; CHECK: add [[SB]], 1
 ; CHECK: mov
-; CHECK: mov [{{[rx][0-9]+}}], rax
+; CHECK: mov [{{[rx][0-9]+}}], {{[a-z0-9]+}}
 
 ; CHECK-LABEL: store_i1:
 ; CHECK: mov [[SF:[rx][0-9]+]], flag
-; CHECK: mov [{{[rx][0-9]+}}], rax
+; CHECK: mov [{{[rx][0-9]+}}], {{[a-z0-9]+}}
 
 ; CHECK-LABEL: store_half_1:
 ; CHECK: mov [[SH:[rx][0-9]+]], halves
 ; CHECK: add [[SH]], 2
 ; CHECK: mov
-; CHECK: mov [{{[rx][0-9]+}}], rax
+; CHECK: mov [{{[rx][0-9]+}}], {{[a-z0-9]+}}
 
 ; CHECK: static bytes [65, 66, 67, 68]
 ; CHECK: static halves [1, 0, 2, 0, 3, 0, 4, 0]

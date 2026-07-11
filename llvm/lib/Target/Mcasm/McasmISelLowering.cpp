@@ -27,6 +27,7 @@
 #include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/CodeGen/SelectionDAG.h"
+#include "llvm/Support/KnownBits.h"
 #include "llvm/Support/ErrorHandling.h"
 
 using namespace llvm;
@@ -127,6 +128,14 @@ McasmTargetLowering::McasmTargetLowering(const McasmTargetMachine &TM,
   setStackPointerRegisterToSaveRestore(Mcasm::rsp);
   setMinFunctionAlignment(Align(4));
   setMinStackArgumentAlignment(Align(4));
+
+  // A disjoint OR (operands share no set bits) is arithmetically an ADD, which
+  // mcasm can do natively.  We annotate such ORs with the Disjoint flag while
+  // their operands still have clean known-bits (before shift lowering rewrites
+  // them into mul/div and loses that information); LowerOperation then turns a
+  // disjoint OR into a native ADD instead of a __bit_or libcall.  This notably
+  // fixes the hi/lo recombination emitted for constant 64-bit shifts.
+  setTargetDAGCombine(ISD::OR);
 
   // Basic arithmetic operations - legal by default for i32
   setOperationAction(ISD::ADD, MVT::i32, Legal);
@@ -1274,19 +1283,28 @@ SDValue McasmTargetLowering::LowerOperation(SDValue Op, SelectionDAG &DAG) const
   case ISD::CTPOP:
     return lowerCTPOP(Op, DAG);
 
-  // i32 bitwise ops - lower to __bit_* software libcalls
+  // i32 bitwise ops - native lowering for constant operands, otherwise the
+  // __bit_* software libcalls.
   case ISD::AND:
-    if (Op.getValueType() == MVT::i32)
+    if (Op.getValueType() == MVT::i32) {
+      if (SDValue V = lowerI32AndOrXor(Op, DAG))
+        return V;
       return LowerI32BitLibCall(Op, DAG, "__bit_and",
                                 {Op.getOperand(0), Op.getOperand(1)});
+    }
     break;
   case ISD::OR:
-    if (Op.getValueType() == MVT::i32)
+    if (Op.getValueType() == MVT::i32) {
+      if (SDValue V = lowerI32AndOrXor(Op, DAG))
+        return V;
       return LowerI32BitLibCall(Op, DAG, "__bit_or",
                                 {Op.getOperand(0), Op.getOperand(1)});
+    }
     break;
   case ISD::XOR:
     if (Op.getValueType() == MVT::i32) {
+      if (SDValue V = lowerI32AndOrXor(Op, DAG))
+        return V;
       SDValue LHS = Op.getOperand(0);
       SDValue RHS = Op.getOperand(1);
       if (auto *C = dyn_cast<ConstantSDNode>(RHS); C && C->isAllOnes())
@@ -1297,23 +1315,32 @@ SDValue McasmTargetLowering::LowerOperation(SDValue Op, SelectionDAG &DAG) const
     }
     break;
   case ISD::SHL:
-    if (Op.getValueType() == MVT::i32)
+    if (Op.getValueType() == MVT::i32) {
+      if (SDValue V = lowerI32Shift(Op, DAG))
+        return V;
       return LowerI32BitLibCall(Op, DAG, "__bit_shl",
                                 {Op.getOperand(0), Op.getOperand(1)});
+    }
     if (Op.getValueType() == MVT::i64)
       return LowerI64LibCall(Op, DAG, RTLIB::SHL_I64);
     break;
   case ISD::SRL:
-    if (Op.getValueType() == MVT::i32)
+    if (Op.getValueType() == MVT::i32) {
+      if (SDValue V = lowerI32Shift(Op, DAG))
+        return V;
       return LowerI32BitLibCall(Op, DAG, "__bit_shr",
                                 {Op.getOperand(0), Op.getOperand(1)});
+    }
     if (Op.getValueType() == MVT::i64)
       return LowerI64LibCall(Op, DAG, RTLIB::SRL_I64);
     break;
   case ISD::SRA:
-    if (Op.getValueType() == MVT::i32)
+    if (Op.getValueType() == MVT::i32) {
+      if (SDValue V = lowerI32Shift(Op, DAG))
+        return V;
       return LowerI32BitLibCall(Op, DAG, "__bit_sar",
                                 {Op.getOperand(0), Op.getOperand(1)});
+    }
     if (Op.getValueType() == MVT::i64)
       return LowerI64LibCall(Op, DAG, RTLIB::SRA_I64);
     break;
@@ -2219,6 +2246,252 @@ SDValue McasmTargetLowering::lowerSRAParts(SDValue Op, SelectionDAG &DAG) const 
                     DAG.getNode(ISD::AND, DL, VT, Hi_sign, Mask_ge32));
 
   return DAG.getMergeValues({Lo_out, Hi_out}, DL);
+}
+
+//===----------------------------------------------------------------------===//
+// Native i32 bit-op lowering for constant operands (no __bit_* libcall).
+//
+// mcasm has no native bitwise instructions, so bit-ops are normally lowered to
+// __bit_* software routines (a full __bit_and is ~300 instructions plus a call
+// frame).  When one operand is a compile-time constant we can instead express
+// the operation with native mul/div/add/sub, which is dramatically cheaper.
+//
+// The identities used here are bit-exact with the __bit_* runtime routines
+// (see llvm/lib/Target/Mcasm/runtime/bits.mch):
+//
+//   shl(X,n) = X * 2^n                                      (native mul)
+//
+// For right shifts, with s = (X < 0 ? 1 : 0) the sign bit and D = 2^n:
+//   Xpos = X - s*2^31        // X with its sign bit cleared -> non-negative
+//   base = sdiv(Xpos, D)     // Xpos >= 0, so truncation == floor
+//   srl(X,n) = base + s*2^(31-n)     // logical  (matches __bit_shr / __udivsi3)
+//   sra(X,n) = base - s*2^(31-n)     // arithmetic (matches __bit_sar)
+//
+// The mul-by-pow2 nodes stay native because DAGCombiner's "mul (1<<c) -> shl"
+// fold is disabled for the mcasm target (see DAGCombiner::visitMUL); likewise
+// the "sdiv pow2 -> shift" fold is disabled, so these divisions stay as a
+// native DIV32ri.
+//===----------------------------------------------------------------------===//
+
+// Emit (X << N) as a native multiply by 2^N.  N is expected in [0,31].
+static SDValue buildNativeShl(SelectionDAG &DAG, const SDLoc &DL, SDValue X,
+                              unsigned N) {
+  if (N == 0)
+    return X;
+  if (N >= 32)
+    return DAG.getConstant(0, DL, MVT::i32);
+  return DAG.getNode(ISD::MUL, DL, MVT::i32, X,
+                     DAG.getConstant(uint64_t(1) << N, DL, MVT::i32));
+}
+
+// Emit a right shift of X by constant N in [0,31] using native mul/div/add/sub.
+// Arith selects arithmetic (sra) vs logical (srl); AssumeNonNeg skips the sign
+// computation when X is known to be >= 0.
+static SDValue buildNativeSrlSra(SelectionDAG &DAG, const SDLoc &DL, SDValue X,
+                                 unsigned N, bool Arith, bool AssumeNonNeg,
+                                 EVT CCVT) {
+  MVT VT = MVT::i32;
+  if (N == 0)
+    return X;
+  if (N >= 32)
+    N = 31; // Callers filter out-of-range shifts; clamp defensively.
+
+  SDValue D = DAG.getConstant(uint64_t(1) << N, DL, VT); // 2^N
+
+  // For a known non-negative value the truncating native divide already equals
+  // both the logical and the arithmetic shift.
+  if (AssumeNonNeg || DAG.SignBitIsZero(X))
+    return DAG.getNode(ISD::SDIV, DL, VT, X, D);
+
+  // s = (X < 0) ? 1 : 0
+  SDValue Zero = DAG.getConstant(0, DL, VT);
+  SDValue S = DAG.getSetCC(DL, CCVT, X, Zero, ISD::SETLT);
+  if (CCVT != VT)
+    S = DAG.getZExtOrTrunc(S, DL, VT);
+
+  // Xpos = X - s*2^31   (clears the sign bit; result is non-negative)
+  SDValue SignWeight = DAG.getConstant(0x80000000U, DL, VT); // 2^31
+  SDValue Xpos = DAG.getNode(ISD::SUB, DL, VT, X,
+                             DAG.getNode(ISD::MUL, DL, VT, S, SignWeight));
+  SDValue Base = DAG.getNode(ISD::SDIV, DL, VT, Xpos, D);
+
+  // term = s * 2^(31-N)
+  SDValue K = DAG.getConstant(uint64_t(1) << (31 - N), DL, VT);
+  SDValue Term = DAG.getNode(ISD::MUL, DL, VT, S, K);
+  return DAG.getNode(Arith ? ISD::SUB : ISD::ADD, DL, VT, Base, Term);
+}
+
+// Decompose (X & C) for a constant C into contiguous runs of set bits.  Each
+// run [lo,hi] of width w contributes  ((X >> lo) mod 2^w) << lo , and the runs
+// are disjoint so their contributions are summed.  Returns SDValue() when C has
+// more than four runs, so the caller can fall back to the __bit_and libcall
+// (the profitability threshold from the task).
+static SDValue buildNativeAndConst(SelectionDAG &DAG, const SDLoc &DL,
+                                   SDValue X, uint32_t C, EVT CCVT) {
+  MVT VT = MVT::i32;
+  if (C == 0)
+    return DAG.getConstant(0, DL, VT);
+  if (C == 0xFFFFFFFFu)
+    return X;
+
+  struct Seg {
+    unsigned Lo, Hi;
+  };
+  SmallVector<Seg, 8> Segs;
+  for (unsigned i = 0; i < 32;) {
+    if ((C >> i) & 1u) {
+      unsigned Lo = i;
+      while (i < 32 && ((C >> i) & 1u))
+        ++i;
+      Segs.push_back({Lo, i - 1});
+    } else {
+      ++i;
+    }
+  }
+  if (Segs.size() > 4)
+    return SDValue();
+
+  SDValue Acc;
+  for (const Seg &Sg : Segs) {
+    unsigned Lo = Sg.Lo, Hi = Sg.Hi, W = Hi - Lo + 1;
+
+    // t = X >> Lo   (logical).  For Lo >= 1 the result is guaranteed >= 0.
+    SDValue T = (Lo == 0)
+                    ? X
+                    : buildNativeSrlSra(DAG, DL, X, Lo, /*Arith=*/false,
+                                        /*AssumeNonNeg=*/false, CCVT);
+
+    // m = t mod 2^W = t - ((t >> W) << W).  When Hi == 31 there are no bits
+    // above the run, so t already fits in W bits and m == t.
+    SDValue M;
+    if (Hi == 31) {
+      M = T;
+    } else {
+      SDValue TShr = buildNativeSrlSra(DAG, DL, T, W, /*Arith=*/false,
+                                       /*AssumeNonNeg=*/Lo >= 1, CCVT);
+      SDValue Hipart = buildNativeShl(DAG, DL, TShr, W);
+      M = DAG.getNode(ISD::SUB, DL, VT, T, Hipart);
+    }
+
+    SDValue Contrib = (Lo == 0) ? M : buildNativeShl(DAG, DL, M, Lo);
+    Acc = Acc ? DAG.getNode(ISD::ADD, DL, VT, Acc, Contrib) : Contrib;
+  }
+  return Acc;
+}
+
+// Native lowering for i32 SHL/SRL/SRA with a constant shift amount.  Returns
+// SDValue() for variable amounts so the caller falls back to a __bit_* libcall.
+SDValue McasmTargetLowering::lowerI32Shift(SDValue Op, SelectionDAG &DAG) const {
+  SDValue X = Op.getOperand(0);
+  auto *AmtC = dyn_cast<ConstantSDNode>(Op.getOperand(1));
+  if (!AmtC)
+    return SDValue();
+
+  SDLoc DL(Op);
+  unsigned Opc = Op.getOpcode();
+  uint64_t N = AmtC->getZExtValue();
+
+  // Constant shifts of 32 or more are UB in IR; match the __bit_* routines:
+  // shl/srl -> 0, sra -> sign splat (shift by 31).
+  if (N >= 32) {
+    if (Opc == ISD::SRA)
+      N = 31;
+    else
+      return DAG.getConstant(0, DL, MVT::i32);
+  }
+
+  EVT CCVT = getSetCCResultType(DAG.getDataLayout(), *DAG.getContext(), MVT::i32);
+  switch (Opc) {
+  case ISD::SHL:
+    return buildNativeShl(DAG, DL, X, (unsigned)N);
+  case ISD::SRL:
+    return buildNativeSrlSra(DAG, DL, X, (unsigned)N, /*Arith=*/false,
+                             /*AssumeNonNeg=*/false, CCVT);
+  case ISD::SRA:
+    return buildNativeSrlSra(DAG, DL, X, (unsigned)N, /*Arith=*/true,
+                             /*AssumeNonNeg=*/false, CCVT);
+  default:
+    return SDValue();
+  }
+}
+
+// Native lowering for i32 AND/OR/XOR with a constant operand.  Returns
+// SDValue() when there is no constant operand or the constant mask is too
+// fragmented, so the caller falls back to the __bit_* libcalls.
+//   (X | C) = X + C - (X & C)
+//   (X ^ C) = X + C - 2*(X & C)
+SDValue McasmTargetLowering::lowerI32AndOrXor(SDValue Op,
+                                              SelectionDAG &DAG) const {
+  SDLoc DL(Op);
+  MVT VT = MVT::i32;
+  unsigned Opc = Op.getOpcode();
+
+  // A disjoint OR is a native ADD.  This catches variable-variable disjoint
+  // ORs that reach lowering (e.g. hi/lo recombination) whose operands still
+  // expose enough known-bits here (a shifted-left value keeps its known
+  // trailing zeros through the mul-by-pow2 lowering).
+  if (Opc == ISD::OR &&
+      DAG.haveNoCommonBitsSet(Op.getOperand(0), Op.getOperand(1)))
+    return DAG.getNode(ISD::ADD, DL, VT, Op.getOperand(0), Op.getOperand(1));
+
+  SDValue LHS = Op.getOperand(0);
+  SDValue RHS = Op.getOperand(1);
+  auto *C = dyn_cast<ConstantSDNode>(RHS);
+  if (!C) {
+    std::swap(LHS, RHS);
+    C = dyn_cast<ConstantSDNode>(RHS);
+  }
+  if (!C)
+    return SDValue(); // variable-variable -> libcall
+
+  uint32_t CV = (uint32_t)C->getZExtValue();
+
+  // ~X : XOR with all-ones -> -1 - X (matches __bit_not, two instructions).
+  if (Opc == ISD::XOR && CV == 0xFFFFFFFFu)
+    return DAG.getNode(ISD::SUB, DL, VT, DAG.getConstant(-1, DL, VT), LHS);
+
+  // Reduce the mask to the bits that can actually be set in X: any mask bit
+  // where X is known-zero contributes 0 to (X & C) and needs no arithmetic.
+  // This both shrinks the segment count (helping the profitability threshold)
+  // and collapses (X & C) to 0 when C only covers known-zero bits, turning a
+  // disjoint OR/XOR into a plain ADD.
+  KnownBits KnownX = DAG.computeKnownBits(LHS);
+  uint32_t Ceff = CV & ~(uint32_t)KnownX.Zero.getZExtValue();
+
+  EVT CCVT = getSetCCResultType(DAG.getDataLayout(), *DAG.getContext(), VT);
+  SDValue And = buildNativeAndConst(DAG, DL, LHS, Ceff, CCVT);
+  if (!And)
+    return SDValue(); // too fragmented -> libcall
+
+  if (Opc == ISD::AND)
+    return And;
+
+  SDValue XC = DAG.getNode(ISD::ADD, DL, VT, LHS, DAG.getConstant(CV, DL, VT));
+  if (Opc == ISD::OR)
+    return DAG.getNode(ISD::SUB, DL, VT, XC, And); // X + C - (X & Ceff)
+
+  // XOR: X + C - 2*(X & Ceff)
+  SDValue TwoAnd = DAG.getNode(ISD::ADD, DL, VT, And, And);
+  return DAG.getNode(ISD::SUB, DL, VT, XC, TwoAnd);
+}
+
+// Rewrite a disjoint (no common set bits) i32 OR into a native ADD.  This must
+// run while the operands still have clean known-bits (before shift lowering
+// turns them into mul/div and loses that information).  The generic
+// add -> disjoint-or canonicalization is disabled for mcasm (see
+// DAGCombiner::visitADD) so this does not ping-pong.
+SDValue McasmTargetLowering::PerformDAGCombine(SDNode *N,
+                                               DAGCombinerInfo &DCI) const {
+  if (N->getOpcode() != ISD::OR || N->getValueType(0) != MVT::i32)
+    return SDValue();
+
+  SelectionDAG &DAG = DCI.DAG;
+  SDValue N0 = N->getOperand(0);
+  SDValue N1 = N->getOperand(1);
+  if (!DAG.haveNoCommonBitsSet(N0, N1))
+    return SDValue();
+
+  return DAG.getNode(ISD::ADD, SDLoc(N), MVT::i32, N0, N1);
 }
 
 SDValue McasmTargetLowering::LowerI32BitLibCall(SDValue Op, SelectionDAG &DAG,

@@ -11,6 +11,8 @@ entry:
 
 ; CHECK-LABEL: main:
 ; CHECK: mov [[P:r[0-9]+]], str
-; CHECK-NEXT: mov [[P]], {{\[}}[[P]]{{\]}}
+; CHECK-NEXT: mov {{[a-z0-9]+}}, {{\[}}[[P]]{{\]}}
+; The byte is extracted with native arithmetic (mul/div), never a __bit_shr
+; libcall.
 ; CHECK-NOT: __bit_shr
 ; CHECK: static str [65, 0]

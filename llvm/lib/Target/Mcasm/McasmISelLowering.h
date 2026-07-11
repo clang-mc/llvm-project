@@ -86,6 +86,8 @@ public:
   const char *getTargetNodeName(unsigned Opcode) const override;
 
   SDValue LowerOperation(SDValue Op, SelectionDAG &DAG) const override;
+
+  SDValue PerformDAGCombine(SDNode *N, DAGCombinerInfo &DCI) const override;
   void ReplaceNodeResults(SDNode *N, SmallVectorImpl<SDValue> &Results,
                           SelectionDAG &DAG) const override;
 
@@ -195,6 +197,13 @@ private:
   SDValue LowerI64LibCall(SDValue Op, SelectionDAG &DAG, RTLIB::Libcall LC) const;
   SDValue LowerI32BitLibCall(SDValue Op, SelectionDAG &DAG, StringRef Name,
                              ArrayRef<SDValue> Args) const;
+
+  // Native lowering of i32 bit-ops with a constant operand (no libcall).
+  // These emit native mul/div/add/sub sequences so that constant masks and
+  // constant shift amounts do not incur a __bit_* libcall.  See
+  // McasmISelLowering.cpp for the exact arithmetic identities.
+  SDValue lowerI32Shift(SDValue Op, SelectionDAG &DAG) const;
+  SDValue lowerI32AndOrXor(SDValue Op, SelectionDAG &DAG) const;
 };
 
 } // namespace llvm

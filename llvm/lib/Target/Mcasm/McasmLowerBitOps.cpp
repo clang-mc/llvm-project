@@ -54,6 +54,29 @@ static bool isAllOnesI32(Value *V) {
   return CI && CI->getType()->isIntegerTy(32) && CI->isMinusOne();
 }
 
+// i32 bit-ops with a compile-time constant operand are lowered natively by the
+// backend (SelectionDAG) into mul/div/add/sub sequences, avoiding the __bit_*
+// libcalls.  Detect those here so the IR pass leaves them alone and they reach
+// the DAG.  For and/or/xor a constant on either side qualifies; for the shifts
+// the shift amount (operand 1) must be constant.
+static bool hasNativeConstBitOp(BinaryOperator *BO) {
+  if (!BO->getType()->isIntegerTy(32))
+    return false;
+  switch (BO->getOpcode()) {
+  case Instruction::And:
+  case Instruction::Or:
+  case Instruction::Xor:
+    return isa<ConstantInt>(BO->getOperand(0)) ||
+           isa<ConstantInt>(BO->getOperand(1));
+  case Instruction::Shl:
+  case Instruction::LShr:
+  case Instruction::AShr:
+    return isa<ConstantInt>(BO->getOperand(1));
+  default:
+    return false;
+  }
+}
+
 static ConstantInt *getRepresentableSignedNarrowConst(ConstantInt *CI64,
                                                       IntegerType *DstTy) {
   if (!CI64 || !CI64->getType()->isIntegerTy(64) || !DstTy)
@@ -500,6 +523,9 @@ bool McasmLowerBitOpsPass::runOnModule(Module &M) {
 
         if (!NewV) {
           if (!BO->getType()->isIntegerTy(32))
+            continue;
+          // Leave constant-operand bit-ops for native backend lowering.
+          if (hasNativeConstBitOp(BO))
             continue;
           switch (BO->getOpcode()) {
           case Instruction::And:
