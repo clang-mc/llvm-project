@@ -31,6 +31,7 @@
 #include "McasmSubtarget.h"
 #include "McasmTargetObjectFile.h"
 #include "TargetInfo/McasmTargetInfo.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/CodeGen/MachineConstantPool.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineInstr.h"
@@ -246,7 +247,7 @@ static std::string replaceInlineAsmPlaceholders(
     StringRef AsmStr, const MachineInstr *MI,
     const SmallVectorImpl<InlineAsmOperandDesc> &Descs,
     const DenseMap<unsigned, std::string> &RegInputFieldByVal,
-    std::string &Err) {
+    std::string &Err, DenseSet<unsigned> *ReferencedVals = nullptr) {
   std::string Out;
   for (size_t I = 0; I < AsmStr.size();) {
     char C = AsmStr[I];
@@ -299,6 +300,8 @@ static std::string replaceInlineAsmPlaceholders(
       return {};
     }
 
+    if (ReferencedVals)
+      ReferencedVals->insert(Val);
     const InlineAsmOperandDesc &D = Descs[Val];
     auto It = RegInputFieldByVal.find(Val);
     StringRef Field = (It == RegInputFieldByVal.end()) ? StringRef() : StringRef(It->second);
@@ -667,30 +670,40 @@ bool McasmAsmPrinter::emitMcasmInlineAsmWrapper(const MachineInstr *MI) {
   if (!buildInlineAsmOperandDescs(MI, Descs, Err))
     report_fatal_error(Twine("mcasm inline asm wrapper: ") + Err);
 
+  // Assign a storage field name to every register-input operand up front so
+  // the placeholder replacement can map `$N` -> `$(field)` consistently.
   DenseMap<unsigned, std::string> RegInputFieldByVal;
-  SmallVector<unsigned, 8> RegInputVals;
-  bool HasAnyInput = false;
+  SmallVector<unsigned, 8> AllRegInputVals;
   for (const InlineAsmOperandDesc &D : Descs) {
-    if (D.Flag.isRegUseKind() || D.Flag.isImmKind() || D.Flag.isMemKind())
-      HasAnyInput = true;
     if (!D.Flag.isRegUseKind())
       continue;
     const MachineOperand &MO = MI->getOperand(D.OpNo);
     if (!MO.isReg())
       report_fatal_error("mcasm inline asm wrapper: reg input is not a register");
-    std::string Field = makeAlphaFieldName(static_cast<unsigned>(RegInputVals.size()));
-    RegInputVals.push_back(D.ValIndex);
+    std::string Field =
+        makeAlphaFieldName(static_cast<unsigned>(AllRegInputVals.size()));
+    AllRegInputVals.push_back(D.ValIndex);
     RegInputFieldByVal.try_emplace(D.ValIndex, Field);
   }
 
+  DenseSet<unsigned> ReferencedVals;
   std::string Replaced = replaceInlineAsmPlaceholders(
-      StringRef(AsmBody), MI, Descs, RegInputFieldByVal, Err);
+      StringRef(AsmBody), MI, Descs, RegInputFieldByVal, Err, &ReferencedVals);
   if (!Err.empty())
     report_fatal_error(Twine("mcasm inline asm wrapper: ") + Err);
 
-  // No-input asm can be emitted inline directly; helper wrapping is only
-  // needed for storage-based argument passing.
-  if (!HasAnyInput) {
+  // Only register inputs actually referenced by the asm template need to be
+  // marshalled through storage. Operands that are declared but never mentioned
+  // in the template (e.g. `__asm("" : "+m"(a))`) require no argument passing,
+  // and mem/imm operands are substituted directly into `Replaced`.
+  SmallVector<unsigned, 8> RegInputVals;
+  for (unsigned Val : AllRegInputVals)
+    if (ReferencedVals.count(Val))
+      RegInputVals.push_back(Val);
+
+  // When no register input is referenced, the body carries no `$(field)` macro
+  // parameters, so it can be emitted inline directly without a helper wrapper.
+  if (RegInputVals.empty()) {
     OutStreamer->emitRawText("\t" + Replaced);
     return true;
   }

@@ -272,6 +272,9 @@ public:
 
   void addPreRegAlloc() override {
     MCASM_DEBUG_LOG("DEBUG: McasmPassConfig::addPreRegAlloc called\n");
+    // Strip inline asm register inputs the template never references, before
+    // the allocator materializes them into spurious `mov rN, <var>` copies.
+    addPass(createMcasmInlineAsmElimPass());
     TargetPassConfig::addPreRegAlloc();
     MCASM_DEBUG_LOG("DEBUG: McasmPassConfig::addPreRegAlloc completed\n");
   }

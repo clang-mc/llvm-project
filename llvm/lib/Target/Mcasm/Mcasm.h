@@ -41,6 +41,10 @@ FunctionPass *createMcasmGlobalBaseRegPass();
 /// Lower i32 bit operations to software helper calls (bit_calc defaults).
 Pass *createMcasmLowerBitOpsPass();
 
+/// Strip inline asm register inputs that the asm template never references,
+/// removing the spurious value materialization before register allocation.
+FunctionPass *createMcasmInlineAsmElimPass();
+
 /// This pass combines multiple accesses to local-dynamic TLS variables so that
 /// the TLS base address for the module is only fetched once per execution path
 /// through the function.
@@ -395,6 +399,7 @@ public:
 
 FunctionPass *createMcasmArgumentStackSlotLegacyPass();
 
+void initializeMcasmInlineAsmElimPass(PassRegistry &);
 void initializeCompressEVEXLegacyPass(PassRegistry &);
 void initializeMcasmFixupBWInstLegacyPass(PassRegistry &);
 void initializeFixupLEAsLegacyPass(PassRegistry &);
