@@ -5013,6 +5013,24 @@ def BuiltinMcfFtoa : Builtin {
   let Prototype = "char const*(double)";
 }
 
+// Mcasm (Minecraft) target: MC scratch-string build primitives. These lower
+// unconditionally to the int_mcasm_str_begin/append intrinsics; the backend
+// folds a compile-time-constant string operand (surfaced by LTO) to O(1)
+// `data modify ... set value` commands, else calls the runtime fallback. The
+// second argument is &__mc_state, the coarse MC-state ordering shadow (see
+// clang-mc libc/include/mcstate.h). Not Const: they have MC-state side effects.
+def BuiltinMcfStrBegin : Builtin {
+  let Spellings = ["__builtin_mcf_str_begin"];
+  let Attributes = [NoThrow];
+  let Prototype = "void(char const*, void*)";
+}
+
+def BuiltinMcfStrAppend : Builtin {
+  let Spellings = ["__builtin_mcf_str_append"];
+  let Attributes = [NoThrow];
+  let Prototype = "void(char const*, void*)";
+}
+
 // HLSL
 def HLSLAddUint64: LangBuiltin<"HLSL_LANG"> {
   let Spellings = ["__builtin_hlsl_adduint64"];

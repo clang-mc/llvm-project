@@ -31,6 +31,7 @@
 #include "llvm/IR/InlineAsm.h"
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/Intrinsics.h"
+#include "llvm/IR/IntrinsicsMcasm.h"
 #include "llvm/IR/IntrinsicsX86.h"
 #include "llvm/IR/MatrixBuilder.h"
 #include "llvm/Support/ConvertUTF.h"
@@ -6583,6 +6584,24 @@ RValue CodeGenFunction::EmitBuiltinExpr(const GlobalDecl GD, unsigned BuiltinID,
         llvm::FunctionType::get(Int8PtrTy, {DoubleTy}, /*isVarArg=*/false);
     llvm::FunctionCallee Fn = CGM.CreateRuntimeFunction(FTy, "__mcf_ftoa");
     return RValue::get(Builder.CreateCall(Fn, {Arg0}));
+  }
+
+  case Builtin::BI__builtin_mcf_str_begin:
+  case Builtin::BI__builtin_mcf_str_append: {
+    // Mcasm target: MC scratch-string build primitives. Lower unconditionally to
+    // the int_mcasm_str_* intrinsic -- constant folding of the string operand
+    // happens in the backend (it only becomes constant after LTO/SCCP), where a
+    // constant folds to O(1) `data modify ... set value` commands and a
+    // non-constant degrades to the runtime *_rt fallback. arg0 is the string,
+    // arg1 is &__mc_state (the coarse MC-state ordering shadow).
+    llvm::Value *Str = EmitScalarExpr(E->getArg(0));
+    llvm::Value *State = EmitScalarExpr(E->getArg(1));
+    unsigned IID = BuiltinID == Builtin::BI__builtin_mcf_str_begin
+                       ? llvm::Intrinsic::mcasm_str_begin
+                       : llvm::Intrinsic::mcasm_str_append;
+    llvm::Function *F = CGM.getIntrinsic(IID);
+    Builder.CreateCall(F, {Str, State});
+    return RValue::get(nullptr);
   }
   }
 

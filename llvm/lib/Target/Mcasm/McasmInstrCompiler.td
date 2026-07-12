@@ -55,6 +55,17 @@ def FRAMEADDR32 : I<0, Pseudo, (outs GR32:$dst),
                     (ins i32imm:$fi, i32imm:$offset),
                     "#FRAMEADDR32", []>;
 
+// MC scratch-string command carrier. Materialized directly (getMachineNode) by
+// McasmTargetLowering::lowerINTRINSIC_VOID for a constant-folded
+// int_mcasm_str_begin/append: the single operand is an ExternalSymbol holding
+// the ready-to-emit MC command text (possibly several '\n'-separated lines).
+// McasmAsmPrinter::emitInstruction intercepts this opcode and emits the text
+// verbatim; it is never encoded or printed through the normal MCInst path.
+// mayLoad/mayStore keep it ordered on the chain w.r.t. the surrounding MC-state
+// asm; hasSideEffects stops it being deleted or reordered as dead.
+let hasSideEffects = 1, mayLoad = 1, mayStore = 1, isCodeGenOnly = 1 in
+def STR_CMD : I<0, Pseudo, (outs), (ins i32imm:$cmd), "# STR_CMD", []>;
+
 
 // MCASM NOTE: 64-bit not supported
 // // ADJCALLSTACKDOWN/UP implicitly use/def RSP because they may be expanded into

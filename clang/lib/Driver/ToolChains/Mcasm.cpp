@@ -14,6 +14,9 @@
 #include "clang/Driver/Job.h"
 #include "clang/Frontend/CompilerInvocation.h"
 #include "clang/Options/Options.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallString.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Path.h"
@@ -71,16 +74,47 @@ static const char *addOptLevelArg(const Driver &D, const ArgList &Args,
   return Rendered;
 }
 
+static unsigned getMcasmOptLevel(const Driver &D, const ArgList &Args) {
+  return clang::getOptimizationLevel(Args, clang::InputKind(), D.getDiags());
+}
+
+// Resolve the whole-program-LTO stdlib bitcode directory relative to clang:
+// <dir of clang.exe>/../lib/mcasm/. Collect every *.bc there (glob, not hard
+// coded names, so newly shipped libraries are picked up automatically) into
+// StdlibBC, sorted for a deterministic link order. Returns the resolved
+// directory (for diagnostics).
+static std::string
+collectMcasmStdlibBitcode(const Driver &D,
+                          llvm::SmallVectorImpl<std::string> &StdlibBC) {
+  llvm::SmallString<128> LibDir(D.Dir);
+  llvm::sys::path::append(LibDir, "..", "lib", "mcasm");
+  llvm::sys::path::remove_dots(LibDir, /*remove_dot_dot=*/true);
+
+  std::error_code EC;
+  for (llvm::sys::fs::directory_iterator I(LibDir, EC), End;
+       I != End && !EC; I.increment(EC)) {
+    llvm::StringRef Path = I->path();
+    if (Path.ends_with_insensitive(".bc"))
+      StdlibBC.push_back(Path.str());
+  }
+  llvm::sort(StdlibBC);
+  return std::string(LibDir);
+}
+
 } // namespace
 
-void mcasm::constructLLVMLinkCommand(Compilation &C, const Tool &T,
-                                     const JobAction &JA,
-                                     const InputInfoList &Inputs,
-                                     const InputInfo &Output,
-                                     const llvm::opt::ArgList &Args) {
+void mcasm::constructLLVMLinkCommand(
+    Compilation &C, const Tool &T, const JobAction &JA,
+    const InputInfoList &Inputs,
+    llvm::ArrayRef<std::string> ExtraBitcodeInputs, const InputInfo &Output,
+    const llvm::opt::ArgList &Args) {
   ArgStringList LinkerInputs;
   for (const InputInfo &Input : Inputs)
     LinkerInputs.push_back(Input.getFilename());
+  // Append the stdlib bitcode (libc/libmc) so the inliner / IPSCCP / DCE can
+  // cross the stdlib boundary in the merged module.
+  for (const std::string &Extra : ExtraBitcodeInputs)
+    LinkerInputs.push_back(Args.MakeArgString(Extra));
   tools::constructLLVMLinkCommand(C, T, JA, Inputs, LinkerInputs, Output, Args);
 }
 
@@ -188,6 +222,24 @@ void mcasm::Linker::ConstructJob(Compilation &C, const JobAction &JA,
     return;
   }
 
+  // Whole-program LTO: pull in the stdlib bitcode shipped next to clang so the
+  // inliner / IPSCCP / DCE can cross the stdlib boundary. Without these, -flto
+  // is a no-op (the stdlib is only stitched in as a precompiled bundle at the
+  // clang-mc assembly stage, which LLVM never sees).
+  //
+  // -nostdlib requests a freestanding link: whole-program LTO over just the
+  // user TUs, with no stdlib bitcode (and hence no bundle-include suppression).
+  const bool LinkStdlib = !Args.hasArg(clang::options::OPT_nostdlib);
+  llvm::SmallVector<std::string, 4> StdlibBC;
+  if (LinkStdlib) {
+    std::string StdlibDir = collectMcasmStdlibBitcode(D, StdlibBC);
+    if (StdlibBC.empty() &&
+        !Args.hasArg(clang::options::OPT__HASH_HASH_HASH)) {
+      D.Diag(clang::diag::err_drv_mcasm_lto_no_stdlib_bitcode) << StdlibDir;
+      return;
+    }
+  }
+
   const char *LinkedBCPath = D.CreateTempFile(C, "mcasm-linked", "bc");
   const char *OptimizedBCPath = D.CreateTempFile(C, "mcasm-opt", "bc");
   const bool EmitAsmOnly = JA.getType() == types::TY_McAsm;
@@ -200,12 +252,29 @@ void mcasm::Linker::ConstructJob(Compilation &C, const JobAction &JA,
                         Output.getBaseInput());
   InputInfo FinalAsm(types::TY_McAsm, FinalAsmPath, Output.getBaseInput());
 
-  constructLLVMLinkCommand(C, *this, JA, Inputs, LinkedBC, Args);
+  constructLLVMLinkCommand(C, *this, JA, Inputs, StdlibBC, LinkedBC, Args);
 
   {
-    ArgStringList OptArgs{LinkedBC.getFilename(), "-o",
-                          OptimizedBC.getFilename()};
-    addOptLevelArg(D, Args, OptArgs);
+    // internalize: strip everything not reachable from an export root, but keep
+    //   - dllexported user symbols (internalize preserves these implicitly),
+    //   - main, the program entry (the backend wires it to _ll_crt), and
+    //   - the runtime libcalls the backend synthesizes without an IR caller
+    //     (llvm.trap -> abort; llvm.mem* -> memcpy/memmove/memset; struct
+    //     compares -> memcmp; llvm.mcasm.str.* with a non-constant operand ->
+    //     __mc_str_begin_rt/__mc_str_append_rt). Their definitions live in
+    //     libc.opt.bc, so keeping them public leaves them in the module for the
+    //     backend's synthesized calls to resolve. External (declaration-only)
+    //     libcalls resolved via the _ll_std bundle are preserved automatically.
+    // default<O>: whole-program optimization across the merged module.
+    // globaldce: drop the now-unreachable stdlib bodies.
+    unsigned Level = getMcasmOptLevel(D, Args);
+    ArgStringList OptArgs{
+        LinkedBC.getFilename(),
+        Args.MakeArgString(Twine("-passes=internalize,default<O") +
+                           Twine(Level) + ">,globaldce"),
+        "-internalize-public-api-list=main,abort,memcpy,memmove,memset,memcmp,"
+        "__mc_str_begin_rt,__mc_str_append_rt",
+        "-o", OptimizedBC.getFilename()};
     for (const Arg *A : Args.filtered(options::OPT_mllvm)) {
       OptArgs.push_back(Args.MakeArgString(Twine("-") + A->getValue()));
       A->claim();
@@ -221,6 +290,14 @@ void mcasm::Linker::ConstructJob(Compilation &C, const JobAction &JA,
         "-x",    "ir",     OptimizedBC.getFilename(), "-o",
         FinalAsm.getFilename()};
     addOptLevelArg(D, Args, BackendArgs);
+    // The library bodies are now in the module; suppress the bundle includes so
+    // we don't redefine every library label (task §5.1). Only relevant when we
+    // actually linked the stdlib bitcode; a freestanding (-nostdlib) LTO link
+    // leaves include behavior to the frontend flags.
+    if (LinkStdlib) {
+      BackendArgs.push_back("-mllvm");
+      BackendArgs.push_back("-mcasm-no-stdlib-include");
+    }
     for (const Arg *A : Args.filtered(options::OPT_mllvm)) {
       BackendArgs.push_back("-mllvm");
       BackendArgs.push_back(A->getValue());

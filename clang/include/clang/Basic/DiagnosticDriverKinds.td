@@ -9,6 +9,9 @@
 let Component = "Driver" in {
 
 def err_drv_no_such_file : Error<"no such file or directory: '%0'">;
+def err_drv_mcasm_lto_no_stdlib_bitcode : Error<
+  "whole-program LTO requires stdlib bitcode at '%0' (expected one or more "
+  "*.bc files); none were found">;
 def err_drv_no_such_file_with_suggestion : Error<
   "no such file or directory: '%0'; did you mean '%1'?">;
 def err_drv_unsupported_opt : Error<"unsupported option '%0'">;

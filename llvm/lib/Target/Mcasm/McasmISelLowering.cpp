@@ -27,6 +27,11 @@
 #include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/CodeGen/SelectionDAG.h"
+#include "llvm/IR/Constants.h"
+#include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/GlobalVariable.h"
+#include "llvm/IR/Intrinsics.h"
+#include "llvm/IR/IntrinsicsMcasm.h"
 #include "llvm/Support/KnownBits.h"
 #include "llvm/Support/ErrorHandling.h"
 
@@ -369,6 +374,11 @@ McasmTargetLowering::McasmTargetLowering(const McasmTargetMachine &TM,
   setOperationAction(ISD::VAARG, MVT::Other, Custom);
   setOperationAction(ISD::VACOPY, MVT::Other, Custom);
   setOperationAction(ISD::VAEND, MVT::Other, Expand);
+
+  // MC scratch-string build intrinsics (int_mcasm_str_begin/append) are lowered
+  // in lowerINTRINSIC_VOID: a constant string folds to O(1) `set value`
+  // commands, otherwise a call to the runtime *_rt fallback.
+  setOperationAction(ISD::INTRINSIC_VOID, MVT::Other, Custom);
 
   // Vector operations - mcasm does not support SIMD/vector operations
   // Expand all vector operations to scalar operations
@@ -1282,6 +1292,8 @@ SDValue McasmTargetLowering::LowerOperation(SDValue Op, SelectionDAG &DAG) const
     return lowerCTLZ(Op, DAG);
   case ISD::CTPOP:
     return lowerCTPOP(Op, DAG);
+  case ISD::INTRINSIC_VOID:
+    return lowerINTRINSIC_VOID(Op, DAG);
 
   // i32 bitwise ops - native lowering for constant operands, otherwise the
   // __bit_* software libcalls.
@@ -2492,6 +2504,144 @@ SDValue McasmTargetLowering::PerformDAGCombine(SDNode *N,
     return SDValue();
 
   return DAG.getNode(ISD::ADD, SDLoc(N), MVT::i32, N0, N1);
+}
+
+//===----------------------------------------------------------------------===//
+// MC scratch-string build intrinsics (int_mcasm_str_begin / str_append)
+//===----------------------------------------------------------------------===//
+
+// If Ptr resolves to a compile-time-constant C string (a definitive-initializer
+// constant global, optionally at a constant byte offset), read its bytes up to
+// the NUL terminator into Out and return true. Otherwise return false.
+static bool getMcasmConstCString(SDValue Ptr, std::string &Out) {
+  // By the time INTRINSIC_VOID is legalized, its GlobalAddress operand has
+  // already been custom-lowered (see lowerGlobalAddress): a bare symbol becomes
+  // McasmISD::Wrapper(TargetGlobalAddress) and a symbol+offset becomes
+  // PTRADD(Wrapper(...), constByteOffset). Peel those back to the underlying
+  // GlobalAddressSDNode plus a byte offset. TargetGlobalAddress is still a
+  // GlobalAddressSDNode, so dyn_cast below matches it.
+  int64_t Offset = 0;
+  for (bool Changed = true; Changed;) {
+    Changed = false;
+    unsigned Opc = Ptr.getOpcode();
+    if ((Opc == ISD::PTRADD || Opc == ISD::ADD) &&
+        isa<ConstantSDNode>(Ptr.getOperand(1))) {
+      Offset += Ptr.getConstantOperandVal(1);
+      Ptr = Ptr.getOperand(0);
+      Changed = true;
+    } else if (Opc == McasmISD::Wrapper || Opc == McasmISD::FunctionWrapper) {
+      Ptr = Ptr.getOperand(0);
+      Changed = true;
+    }
+  }
+  auto *GA = dyn_cast<GlobalAddressSDNode>(Ptr);
+  if (!GA)
+    return false;
+  Offset += GA->getOffset();
+  if (Offset < 0)
+    return false;
+  const auto *GV = dyn_cast<GlobalVariable>(GA->getGlobal());
+  if (!GV || !GV->hasDefinitiveInitializer())
+    return false;
+  const Constant *Init = GV->getInitializer();
+
+  // A zero-initialized array is an empty C string at any in-range offset.
+  if (isa<ConstantAggregateZero>(Init)) {
+    Out.clear();
+    return true;
+  }
+
+  const auto *CDS = dyn_cast<ConstantDataSequential>(Init);
+  if (!CDS || CDS->getElementByteSize() != 1)
+    return false;
+  StringRef Bytes = CDS->getRawDataValues();
+  if ((uint64_t)Offset > Bytes.size())
+    return false;
+  StringRef Tail = Bytes.substr(Offset);
+  size_t NulPos = Tail.find('\0');
+  if (NulPos != StringRef::npos)
+    Tail = Tail.substr(0, NulPos);
+  Out.assign(Tail.begin(), Tail.end());
+  return true;
+}
+
+// Escape a raw string for a Minecraft SNBT double-quoted literal inside an
+// `inline ... set value "..."` command. The clang-mc `inline` directive passes
+// its line through verbatim, so the bytes we emit are exactly what Minecraft's
+// SNBT parser sees: backslash and quote must be escaped, and control characters
+// that would otherwise split or corrupt the single-line command are escaped too.
+static std::string escapeMcSnbtString(StringRef S) {
+  std::string O;
+  O.reserve(S.size());
+  for (char C : S) {
+    switch (C) {
+    case '\\': O += "\\\\"; break;
+    case '"':  O += "\\\""; break;
+    case '\n': O += "\\n"; break;
+    case '\r': O += "\\r"; break;
+    case '\t': O += "\\t"; break;
+    default:   O += C; break;
+    }
+  }
+  return O;
+}
+
+SDValue McasmTargetLowering::lowerINTRINSIC_VOID(SDValue Op,
+                                                 SelectionDAG &DAG) const {
+  unsigned IID = Op.getConstantOperandVal(1);
+  const bool IsBegin = IID == Intrinsic::mcasm_str_begin;
+  const bool IsAppend = IID == Intrinsic::mcasm_str_append;
+  if (!IsBegin && !IsAppend)
+    return SDValue(); // Not ours: leave as-is for default legalization.
+
+  SDLoc DL(Op);
+  SDValue Chain = Op.getOperand(0);
+  SDValue StrPtr = Op.getOperand(2); // operand 1 is the intrinsic ID.
+
+  // Constant operand: fold to O(1) MC scratch-string commands. See task §3.1.
+  std::string Lit;
+  if (getMcasmConstCString(StrPtr, Lit)) {
+    std::string Cmd;
+    if (IsBegin) {
+      // str.begin(L) -> seed scratch s1 in one command.
+      Cmd = "inline data modify storage std:vm s1 set value {str: \"" +
+            escapeMcSnbtString(Lit) + "\", next: \"\"}";
+    } else {
+      // str.append("") is a no-op: drop the node, keep the chain.
+      if (Lit.empty())
+        return Chain;
+      // str.append(L) -> stage the whole literal into s1.next then merge once,
+      // independent of the string length.
+      Cmd = "inline data modify storage std:vm s1.next set value \"" +
+            escapeMcSnbtString(Lit) + "\"\n" +
+            "inline function std:_internal/merge_string with storage std:vm s1";
+    }
+
+    // Carry the ready-to-emit command text through a STR_CMD machine node as an
+    // ExternalSymbol operand. createExternalSymbolName copies it into storage
+    // that lives as long as the MachineFunction (getTargetExternalSymbol does
+    // not copy), so it survives to McasmAsmPrinter::emitInstruction.
+    const char *Persist = DAG.getMachineFunction().createExternalSymbolName(Cmd);
+    SDValue Sym = DAG.getTargetExternalSymbol(Persist, MVT::i32);
+    SDNode *MN = DAG.getMachineNode(Mcasm::STR_CMD, DL, MVT::Other,
+                                    {Sym, Chain});
+    return SDValue(MN, 0);
+  }
+
+  // Non-constant operand: call the runtime fallback (the existing char-by-char
+  // loop). See task §2.4 / §3.2.
+  const char *FnName = IsBegin ? "__mc_str_begin_rt" : "__mc_str_append_rt";
+  Type *PtrTy = PointerType::getUnqual(*DAG.getContext());
+  TargetLowering::ArgListTy Args;
+  Args.emplace_back(StrPtr, PtrTy);
+  SDValue Callee =
+      DAG.getExternalSymbol(FnName, getPointerTy(DAG.getDataLayout()));
+  TargetLowering::CallLoweringInfo CLI(DAG);
+  CLI.setDebugLoc(DL).setChain(Chain).setLibCallee(
+      CallingConv::C, Type::getVoidTy(*DAG.getContext()), Callee,
+      std::move(Args));
+  std::pair<SDValue, SDValue> Res = LowerCallTo(CLI);
+  return Res.second; // the call's output chain
 }
 
 SDValue McasmTargetLowering::LowerI32BitLibCall(SDValue Op, SelectionDAG &DAG,

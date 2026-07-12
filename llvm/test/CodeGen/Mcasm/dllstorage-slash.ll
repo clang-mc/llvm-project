@@ -8,4 +8,4 @@ entry:
 }
 
 ; CHECK: extern _ll_shared:foo/bar:
-; CHECK: export _ll_shared:z/qux:
+; CHECK: api _ll_shared:z/qux:

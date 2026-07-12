@@ -50,12 +50,27 @@
 #include "llvm/MC/MCStreamer.h"
 #include "llvm/MC/MCSymbol.h"
 #include "llvm/MC/TargetRegistry.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
 #include <cctype>
 
 using namespace llvm;
+
+// Whole-program LTO path: when the user program is linked together with the
+// stdlib bitcode (libc/libmc) into a single module, the library function
+// bodies are already present in this module. Re-emitting the `_ll_libc` /
+// `_ll_libmc` bundle includes on top of that would redefine every library
+// label. This flag suppresses those two includes (but keeps `_ll_std`, which
+// provides external MC runtime primitives + compiler-rt). See
+// clang-mc/tools/foo-benchmark/TASK-driver-wholeprogram-lto.md §5.1.
+static cl::opt<bool> McasmNoStdlibInclude(
+    "mcasm-no-stdlib-include",
+    cl::desc("Suppress the automatic #include \"_ll_libc\"/\"_ll_libmc\" "
+             "bundle lines (used by the whole-program LTO path where the "
+             "library bodies are linked into the module)."),
+    cl::init(false), cl::Hidden);
 
 static void printMcasmMemOperand(const MachineInstr *MI, unsigned OpNo,
                                  raw_ostream &O) {
@@ -311,6 +326,41 @@ static std::string replaceInlineAsmPlaceholders(
   return Out;
 }
 
+// Rewrite `mov rN, $(param)` -> `inline $scoreboard players set rN vm_regs
+// $(param)`. Returns true (and fills Out) when Core matches that exact shape.
+// Core is the leading-whitespace-stripped line; Prefix is that whitespace.
+static bool rewriteMcasmMacroRegLoad(StringRef Prefix, StringRef Core,
+                                     std::string &Out) {
+  if (!Core.starts_with("mov"))
+    return false;
+  StringRef Rest = Core.drop_front(3);
+  size_t WsLen = Rest.find_first_not_of(" \t");
+  if (WsLen == 0 || WsLen == StringRef::npos)
+    return false;
+  Rest = Rest.drop_front(WsLen);
+  // Register operand: r<digits>
+  if (Rest.empty() || Rest.front() != 'r')
+    return false;
+  size_t RegEnd = 1;
+  while (RegEnd < Rest.size() && std::isdigit((unsigned char)Rest[RegEnd]))
+    ++RegEnd;
+  if (RegEnd == 1)
+    return false;
+  StringRef Reg = Rest.take_front(RegEnd);
+  Rest = Rest.drop_front(RegEnd);
+  // Separating comma (optionally surrounded by spaces).
+  Rest = Rest.ltrim(" \t");
+  if (!Rest.consume_front(","))
+    return false;
+  Rest = Rest.ltrim(" \t");
+  // Macro-parameter source: $(...) spanning the remainder of the line.
+  if (!Rest.starts_with("$(") || !Rest.ends_with(")"))
+    return false;
+  Out = (Prefix + "inline $scoreboard players set " + Reg + " vm_regs " + Rest)
+            .str();
+  return true;
+}
+
 static std::string rewriteMcasmInlineHelperBody(StringRef Body) {
   SmallVector<StringRef, 8> Lines;
   Body.split(Lines, '\n');
@@ -324,10 +374,18 @@ static std::string rewriteMcasmInlineHelperBody(StringRef Body) {
     } else {
       StringRef Prefix = Line.take_front(FirstNonWs);
       StringRef Core = Line.drop_front(FirstNonWs);
+      std::string Rewritten;
       if (Core.starts_with("inline ") && !Core.starts_with("inline $") &&
           Core.contains("$(")) {
         Out += Prefix.str();
         Out += (Twine("inline $") + Core.drop_front(7)).str();
+      } else if (rewriteMcasmMacroRegLoad(Prefix, Core, Rewritten)) {
+        // Defensive: `mov rN, $(param)` is illegal inside a macro mcfunction
+        // body; it must be materialized via a scoreboard set. The current
+        // backend already emits inline asm inputs through scoreboard ops so
+        // this normally matches nothing, but the whole-program LTO path relies
+        // on it never leaking (task §5.2).
+        Out += Rewritten;
       } else {
         Out += Line.str();
       }
@@ -526,10 +584,12 @@ void McasmAsmPrinter::emitStartOfAsmFile(Module &M) {
   }
   // mcasm requires #include "_ll_std" at the start of every file
   OutStreamer->emitRawText("#include \"_ll_std\"");
-  if (M.getModuleFlag("mcasm-libc-include"))
-    OutStreamer->emitRawText("#include \"_ll_libc\"");
-  if (M.getModuleFlag("mcasm-libmc-include"))
-    OutStreamer->emitRawText("#include \"_ll_libmc\"");
+  if (!McasmNoStdlibInclude) {
+    if (M.getModuleFlag("mcasm-libc-include"))
+      OutStreamer->emitRawText("#include \"_ll_libc\"");
+    if (M.getModuleFlag("mcasm-libmc-include"))
+      OutStreamer->emitRawText("#include \"_ll_libmc\"");
+  }
   bool HasMainDefinition = llvm::any_of(M, [](const Function &F) {
     return !F.isDeclaration() && F.getName() == "main";
   });
@@ -887,6 +947,19 @@ void McasmAsmPrinter::emitFunctionEntryLabel() {
 
 void McasmAsmPrinter::emitInstruction(const MachineInstr *MI) {
   MCASM_DEBUG_LOG("DEBUG: McasmAsmPrinter::emitInstruction called, Opcode=%u\n", MI->getOpcode());
+
+  // MC scratch-string command carrier: emit the folded `set value` command text
+  // verbatim. Its single ExternalSymbol operand holds one or more '\n'-separated
+  // lines (see McasmTargetLowering::lowerINTRINSIC_VOID). Handled before the
+  // generic pseudo/MCInst path, which cannot lower an arbitrary-text operand.
+  if (MI->getOpcode() == Mcasm::STR_CMD) {
+    StringRef Cmd = MI->getOperand(0).getSymbolName();
+    SmallVector<StringRef, 2> Lines;
+    Cmd.split(Lines, '\n');
+    for (StringRef Line : Lines)
+      OutStreamer->emitRawText(Twine("\t") + Line);
+    return;
+  }
 
   // Skip pseudo instructions
   if (MI->isPseudo()) {

@@ -11,6 +11,8 @@
 
 #include "clang/Driver/Tool.h"
 #include "clang/Driver/ToolChain.h"
+#include "llvm/ADT/ArrayRef.h"
+#include <string>
 
 namespace clang {
 namespace driver {
@@ -20,6 +22,7 @@ namespace mcasm {
 void constructLLVMLinkCommand(Compilation &C, const Tool &T,
                               const JobAction &JA,
                               const InputInfoList &Inputs,
+                              llvm::ArrayRef<std::string> ExtraBitcodeInputs,
                               const InputInfo &Output,
                               const llvm::opt::ArgList &Args);
 

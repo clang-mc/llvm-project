@@ -5467,7 +5467,12 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
     // -ffreestanding also suppresses the automatic libmc header.
     if (Args.hasArg(options::OPT_ffreestanding))
       CmdArgs.push_back("-fmcasm-no-ll-libmc");
-    if (Args.hasArg(options::OPT_fmcasm_anonymize_static_data))
+    // The whole-program LTO path links every user TU plus the stdlib bitcode
+    // into a single module before lowering. Anonymizing static data keeps its
+    // per-TU labels from colliding across that merge, so enable it implicitly
+    // under -flto (still honoring an explicit request otherwise). See
+    // clang-mc/tools/foo-benchmark/TASK-driver-wholeprogram-lto.md.
+    if (Args.hasArg(options::OPT_fmcasm_anonymize_static_data) || IsUsingLTO)
       CmdArgs.push_back("-fmcasm-anonymize-static-data");
   }
 

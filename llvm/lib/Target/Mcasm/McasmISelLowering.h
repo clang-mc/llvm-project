@@ -192,6 +192,10 @@ private:
   SDValue lowerVAARG(SDValue Op, SelectionDAG &DAG) const;
   SDValue lowerByteSemanticLoad(SDValue Op, SelectionDAG &DAG) const;
   SDValue lowerByteSemanticStore(SDValue Op, SelectionDAG &DAG) const;
+  // MC scratch-string build primitives (int_mcasm_str_begin/append): fold a
+  // constant string operand to O(1) `set value` commands, else call the
+  // runtime *_rt fallback. See TASK-const-string-fold.md.
+  SDValue lowerINTRINSIC_VOID(SDValue Op, SelectionDAG &DAG) const;
 
   // i64 support - custom lowering to libcalls
   SDValue LowerI64LibCall(SDValue Op, SelectionDAG &DAG, RTLIB::Libcall LC) const;

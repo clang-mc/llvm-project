@@ -8,4 +8,4 @@ entry:
 }
 
 ; CHECK: extern _ll_shared:-e5-a4-96-e9-83-a8:
-; CHECK: export _ll_shared:-41-e5-87-bd-e6-95-b09:
+; CHECK: api _ll_shared:-41-e5-87-bd-e6-95-b09:
